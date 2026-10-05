@@ -1,0 +1,23 @@
+# Deploy this repository as a Blueprint in Render.
+# The free plan is for playtesting; review capacity before a public launch.
+services:
+  - type: web
+    name: rumble-run
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci --include=dev && npm test && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeployTrigger: off
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: MAX_ROOMS
+        value: "2"
+      - key: MAX_CONNECTIONS
+        value: "60"
