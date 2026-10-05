@@ -3,7 +3,7 @@ export function cleanName(value) {
   return String(value ?? 'Bean').normalize('NFKC').replace(/[^\p{L}\p{N} _.-]/gu, '').trim().slice(0, 18) || 'Bean';
 }
 export function cleanSettings(value = {}) {
-  return { rounds: Number.isInteger(value.rounds) ? Math.max(4, Math.min(8, value.rounds)) : 6, seed: String(value.seed || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) };
+  return { rounds: Number.isInteger(value.rounds) ? Math.max(4, Math.min(8, value.rounds)) : 6, seed: String(value.seed || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40), difficulty: ['easy', 'normal', 'hard'].includes(value.difficulty) ? value.difficulty : 'normal', playlist: value.playlist === 'races' ? 'races' : 'mixed' };
 }
 export function cleanColor(value) { return COLORS.includes(value) ? value : COLORS[0]; }
 export function cleanInput(value) {

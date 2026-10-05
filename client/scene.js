@@ -3,9 +3,9 @@ import { generateMap, hazardTransform, crownHeight } from '../shared/maps.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
 export class GameScene {
-  constructor(canvas) {
+  constructor(canvas, renderer = null) {
     this.canvas = canvas;
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
+    this.renderer = renderer || new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.35));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.scene = new THREE.Scene();
@@ -24,8 +24,12 @@ export class GameScene {
     this.warningMaterial = new THREE.MeshLambertMaterial({ color: '#ff4c6f', flatShading: true });
     this.shadowMaterial = new THREE.MeshBasicMaterial({ color: '#263558', transparent: true, opacity: 0.16, depthWrite: false });
     this.world = new THREE.Group(); this.scene.add(this.world);
-    this.target = new THREE.Vector3(); this.desiredCamera = new THREE.Vector3(); this.lookTarget = new THREE.Vector3();
+    this.target = new THREE.Vector3(); this.desiredCamera = new THREE.Vector3(); this.lookTarget = new THREE.Vector3(); this.lookDesired = new THREE.Vector3();
+    this.forward = new THREE.Vector3(0, 0, -1); this.cameraOffset = new THREE.Vector3(); this.cameraShakeOffset = new THREE.Vector3();
     this.projectVector = new THREE.Vector3(); this.menu = true; this.quality = 'balanced'; this.smoothInitialized = false;
+    this.cameraFov = 58; this.cameraDistance = 11.5; this.cameraYaw = 0;
+    this.reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this.showNames = true; this.showShadows = true;
     window.addEventListener('resize', () => this.resize()); this.resize();
     canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); document.dispatchEvent(new CustomEvent('render-lost')); });
     canvas.addEventListener('webglcontextrestored', () => location.reload());
@@ -155,6 +159,16 @@ export class GameScene {
       } else this.addArch(f.x, y, f.z, 16, 'FINISH', theme);
       for (let i = 0; i < 16; i++) for (let j = 0; j < 2; j++) this.mesh('box', (i + j) % 2 ? '#ffffff' : theme.edge, [f.x - 7.5 + i, y + 0.035, f.z + 1.2 + j], [1, 0.06, 1]);
     }
+    // Visible checkpoints make the safe route and the next respawn readable.
+    this.checkpointMarkers = [];
+    for (const c of map.checkpoints.slice(1)) {
+      const marker = new THREE.Group(); marker.position.set(c.x, c.y - 1.1, c.z);
+      for (const side of [-1, 1]) {
+        this.mesh('cylinder', '#ffffff', [side * (c.width / 2 - 0.5), 1.3, 0], [0.09, 2.6, 0.09], marker);
+        this.mesh('box', '#65eac5', [side * (c.width / 2 - 0.95), 2.3, 0], [0.9, 0.6, 0.08], marker);
+      }
+      this.world.add(marker); this.checkpointMarkers.push(marker);
+    }
     const under = this.mesh('box', map.slime ? '#ff72bb' : '#77cdda', [0, -17, -map.length / 2], [700, 1, 650]);
     this.slimeMesh = map.slime ? under : null;
     // Cheap distant scenery: low-poly clouds and floating islands, no texture fetches.
@@ -162,7 +176,15 @@ export class GameScene {
       const x = (i % 2 ? -1 : 1) * (24 + i % 4 * 9), z = -i * 18 + 15;
       const island = this.mesh('cone', theme.edge, [x, -5 - i % 3, z], [4 + i % 3, 6, 4 + i % 3]); island.rotation.z = Math.PI;
       this.mesh('cylinder', theme.floor, [x, -2 - i % 3, z], [4 + i % 3, 0.6, 4 + i % 3]);
-      if (i % 2 === 0) for (let j = 0; j < 3; j++) this.mesh('sphere', '#eaf5ff', [x + j * 2, 8 + i % 3 * 3, z - 16], [3.2, 1.7, 2.1]);
+      if (map.decor === 'crystals') {
+        for (let j = 0; j < 3; j++) this.mesh('cone', j % 2 ? theme.secondary : theme.accent, [x + j * 1.8, 1 + j, z - 3], [1.1, 6 + j * 2, 1.1]);
+      } else if (map.decor === 'towers') {
+        this.mesh('box', theme.secondary, [x, 3, z], [4, 9 + i % 3 * 3, 4]);
+        this.mesh('box', theme.accent, [x, 8 + i % 3 * 1.5, z], [5, 1, 5]);
+      } else if (map.decor === 'balloons' && i % 2 === 0) {
+        this.mesh('sphere', i % 4 ? theme.accent : theme.secondary, [x, 12, z], [3.2, 3.8, 3.2]);
+        this.mesh('cylinder', '#ffffff', [x, 6, z], [0.045, 7, 0.045]);
+      } else if (i % 2 === 0) for (let j = 0; j < 3; j++) this.mesh('sphere', '#eaf5ff', [x + j * 2, 8 + i % 3 * 3, z - 16], [3.2, 1.7, 2.1]);
     }
     this.smoothInitialized = false;
   }
@@ -220,7 +242,8 @@ export class GameScene {
     if (this.avatars.has(player.id)) return this.avatars.get(player.id);
     const root = this.makeBean(player.color); this.world.add(root);
     const label = document.createElement('div'); label.className = `player-label${me ? ' me' : ''}`; label.textContent = me ? `${player.name} · YOU` : player.name; document.querySelector('#labels').append(label);
-    const a = { root, label, player, data: null, at: 0 }; this.avatars.set(player.id, a); return a;
+    const a = { root, label, player, data: null, stride: 0, squash: 0, lastGrounded: false, groundY: null, teleport: null };
+    this.avatars.set(player.id, a); return a;
   }
   updateAvatar(id, state, time, delta) {
     const a = this.avatars.get(id); if (!a) return;
@@ -229,19 +252,33 @@ export class GameScene {
     a.root.visible = true;
     a.root.position.set(...state.p);
     let diff = state.f - a.root.rotation.y;
-    diff = Math.atan2(Math.sin(diff), Math.cos(diff)); a.root.rotation.y += diff * Math.min(1, delta * 18);
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff)); a.root.rotation.y += diff * (1 - Math.exp(-delta * 16));
     const { model, feet, arms, shadow } = a.root.userData;
     const speed = Math.hypot(state.v?.[0] || 0, state.v?.[2] || 0);
-    const moving = Math.min(1, speed / 5), stride = Math.sin(time * 17);
-    model.position.y = state.g ? Math.abs(stride) * 0.055 * moving : 0;
-    model.rotation.x += ((state.d > 0 ? -1.3 : 0) - model.rotation.x) * Math.min(1, delta * 20);
-    model.rotation.z = state.s > 0 ? Math.sin(time * 28) * 0.6 : Math.sin(time * 3) * 0.025;
+    const moving = Math.min(1, speed / 7), easing = 1 - Math.exp(-delta * 18);
+    a.stride += delta * speed * 2.2;
+    const stride = Math.sin(a.stride);
+    if (a.teleport !== state.tp) { a.squash = 0; a.groundY = null; a.teleport = state.tp; }
+    if (state.g) a.groundY = state.p[1] - 0.775;
+    if (state.g && !a.lastGrounded) a.squash = 0.19;
+    a.lastGrounded = state.g;
+    a.squash *= Math.exp(-delta * 12);
+    const stretch = !state.g && state.d <= 0 ? Math.min(0.1, Math.abs(state.v?.[1] || 0) * 0.008) : 0;
+    model.scale.set(1 + a.squash * 0.5 - stretch * 0.35, 1 - a.squash + stretch, 1 + a.squash * 0.5);
+    model.position.y = state.g ? Math.abs(stride) * 0.045 * moving - a.squash * 0.25 : 0;
+    model.rotation.x += ((state.d > 0 ? -1.38 : state.s > 0 ? -0.5 : -0.07 * moving) - model.rotation.x) * easing;
+    model.rotation.z += ((state.s > 0 ? Math.sin(time * 24) * 0.55 : -diff * moving * 0.13) - model.rotation.z) * easing;
     feet.forEach((f, i) => f.position.z = -0.08 + stride * (i ? 1 : -1) * 0.21 * moving);
-    arms.forEach((arm, i) => arm.rotation.x = stride * (i ? 1 : -1) * 0.5 * moving);
-    shadow.position.y = state.g ? -0.775 : -0.78 - Math.min(3, Math.max(0, state.v?.[1] || 0) * 0.1);
-    shadow.visible = state.g;
+    arms.forEach((arm, i) => {
+      arm.rotation.x += ((state.d > 0 ? -1.4 : !state.g ? -0.7 : stride * (i ? 1 : -1) * 0.55 * moving) - arm.rotation.x) * easing;
+      arm.rotation.z = (i ? 1 : -1) * (state.g ? 0.45 : 0.8);
+    });
+    const altitude = a.groundY == null ? 10 : state.p[1] - a.groundY;
+    shadow.position.y = -altitude + 0.01;
+    shadow.scale.setScalar(Math.max(0.45, 1 - altitude * 0.1));
+    shadow.visible = this.showShadows && altitude > 0 && altitude < 3.5;
     this.projectVector.copy(a.root.position); this.projectVector.y += 1.5; this.projectVector.project(this.camera);
-    const visible = this.projectVector.z < 1 && Math.abs(this.projectVector.x) < 1.1 && Math.abs(this.projectVector.y) < 1.1 && a.root.position.distanceTo(this.camera.position) < 45;
+    const visible = this.showNames && this.projectVector.z < 1 && Math.abs(this.projectVector.x) < 1.1 && Math.abs(this.projectVector.y) < 1.1 && a.root.position.distanceTo(this.camera.position) < 45;
     a.label.hidden = !visible;
     if (visible) a.label.style.transform = `translate(${(this.projectVector.x * 0.5 + 0.5) * innerWidth}px,${(-this.projectVector.y * 0.5 + 0.5) * innerHeight}px) translate(-50%,-100%)`;
   }
@@ -253,7 +290,7 @@ export class GameScene {
       const dropping = dropAt !== null && dropAt !== undefined && time >= dropAt;
       mesh.visible = !dropping || time - dropAt < 0.65;
       mesh.position.y = p.position[1] - (dropping ? Math.pow((time - dropAt) * 9, 2) : 0);
-      mesh.rotation.z = state?.a || 0;
+      mesh.rotation.z = state?.a ?? p.rotation[2];
       mesh.rotation.y = p.turntable ? time * p.turntable : p.rotation[1];
       mesh.material = dropAt != null && dropAt - time > 0 && dropAt - time < 2 && Math.floor(time * 8) % 2 ? this.warningMaterial : this.vertexMaterial;
       if (dropAt != null && dropAt - time > 0 && dropAt - time < 2) mesh.position.y += Math.sin(time * 45) * 0.04;
@@ -272,7 +309,7 @@ export class GameScene {
     if (this.crown) { this.crown.position.y = crownHeight(this.map, time); this.crown.rotation.y = time * 0.8; }
     if (this.slimeMesh) this.slimeMesh.position.y = this.map.slime.start + time * this.map.slime.speed - 0.5;
   }
-  render(delta, time, follow, menuTime, env) {
+  render(delta, time, follow, followState, menuTime, env) {
     this.environment(time, env);
     if (this.menu) {
       const mobile = innerWidth < 760;
@@ -281,11 +318,23 @@ export class GameScene {
       if (this.menuBean) { this.menuBean.rotation.y = Math.PI - 0.3 + Math.sin(menuTime * 0.6) * 0.16; this.menuBean.position.y = 4.5 + Math.sin(menuTime * 2) * 0.1; this.menuCrown.rotation.y = menuTime * 0.6; }
     } else if (follow) {
       this.target.set(...follow); this.target.y = Math.max(this.target.y, this.map.mode === 'survival' ? (this.map.killY ?? -14) + 4 : -2);
-      this.desiredCamera.copy(this.target).add(new THREE.Vector3(0, 7.3, 11.7));
-      this.lookTarget.copy(this.target).add(new THREE.Vector3(0, 0.7, -3.7));
-      if (!this.smoothInitialized || this.camera.position.distanceTo(this.desiredCamera) > 45) { this.camera.position.copy(this.desiredCamera); this.smoothInitialized = true; }
-      else this.camera.position.lerp(this.desiredCamera, 1 - Math.exp(-delta * 6.5));
+      const speed = Math.hypot(followState?.v?.[0] || 0, followState?.v?.[2] || 0);
+      this.forward.set(-Math.sin(this.cameraYaw), 0, -Math.cos(this.cameraYaw));
+      this.cameraOffset.set(-this.forward.x * this.cameraDistance, this.cameraDistance * 0.57 + 0.9, -this.forward.z * this.cameraDistance);
+      this.desiredCamera.copy(this.target).add(this.cameraOffset);
+      this.lookDesired.copy(this.target).addScaledVector(this.forward, 2.8);
+      this.lookDesired.y += 0.5;
+      this.lookDesired.x += (followState?.v?.[0] || 0) * 0.065;
+      this.lookDesired.z += (followState?.v?.[2] || 0) * 0.065;
+      if (!this.smoothInitialized || this.camera.position.distanceTo(this.desiredCamera) > 35) {
+        this.camera.position.copy(this.desiredCamera); this.lookTarget.copy(this.lookDesired); this.smoothInitialized = true;
+      } else {
+        this.camera.position.lerp(this.desiredCamera, 1 - Math.exp(-delta * 10));
+        this.lookTarget.lerp(this.lookDesired, 1 - Math.exp(-delta * 14));
+      }
       this.camera.lookAt(this.lookTarget);
+      const fov = this.cameraFov + (this.reducedMotion ? 0 : Math.min(3, speed * 0.17));
+      if (Math.abs(this.camera.fov - fov) > 0.01) { this.camera.fov += (fov - this.camera.fov) * (1 - Math.exp(-delta * 5)); this.camera.updateProjectionMatrix(); }
     }
     this.renderer.render(this.scene, this.camera);
   }

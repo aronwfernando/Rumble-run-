@@ -2,7 +2,7 @@
 
 A self-hosted, human-only multiplayer bean racer built with Three.js, Socket.IO, and cannon-es. It is an original low-poly party racer with simple geometry and solid colors: no character downloads, no texture packs, and no bot players.
 
-Create a private room and share its six-character code or invite link, or choose public quick play. A match uses 4–8 rounds (six by default), alternating races and survival maps before a crown climb or last-bean-standing final. The server owns player movement, collisions, checkpoints, eliminations, and the winner.
+Create a private room and share its six-character code or invite link, or choose public quick play. A match uses 4–8 rounds (six by default), alternating races and survival maps before a crown climb or last-bean-standing final. Hosts can also choose races only and easy, normal, or hard difficulty. The server owns player movement, collisions, checkpoints, eliminations, and the winner.
 
 ## Put it online
 
@@ -27,14 +27,23 @@ The server serves the built client from `dist/`. It listens on `0.0.0.0` by defa
 
 ## Controls
 
-- `WASD` or arrow keys: move
-- `Space`: jump (with a small coyote-time window)
+- `WASD` or arrow keys: move relative to the camera
+- `Space` or right mouse button: jump (with coyote time and jump buffering)
 - `Shift` or `F`: dive; dive momentum and cooldown are server-validated
 - `E`: grab the moving crown in a crown-climb final
+- Drag the game view: rotate the camera; `C`: center it
+- `R`: reset to the last checkpoint during a race (counts as a fall)
 - `Tab`: open the lineup
-- `Esc`: pause/settings overlay
+- `Esc`: settings overlay (online play continues)
 
 Touch devices get a virtual stick, jump, dive, and crown buttons automatically.
+Gamepads use the left stick to move, right stick to look, A to jump, B to dive,
+and X to grab. Settings include graphics quality, field of view, camera distance
+and sensitivity, reduced camera motion, player names, shadows, and sound.
+
+Falls in races display checkpoint recovery feedback. Qualification and elimination
+have dedicated overlays with a spectate action, followed by persistent status in
+the HUD. Between rounds, eliminated players see an explicit result screen.
 
 ## Map generation
 
@@ -57,7 +66,10 @@ The generator shuffles a recipe deck, avoiding repeated race families and
 survival variants within a 4–8-round match. Neighbouring rounds use different
 palettes. Sections, widths, heights, lateral offsets, gaps, and obstacle phases
 vary with the seed. Difficulty increases through the tournament, and the first
-section of a race uses gentler hazard timing.
+section of a race uses gentler hazard timing. Each race keeps an opening challenge
+from its main family, then mixes in two sections from another family. Adjacent
+section layouts vary, while later broad platforms may combine separated hazards.
+Seeded clouds, crystals, balloons, and towers give palettes different scenery.
 
 Five survival arenas cover sweepers with collapsing edges, three layers of
 hexagonal tiles, moving walls, rising slime, and rotating island platforms.
@@ -118,6 +130,7 @@ These diagrams are for inspecting layouts; they are not gameplay screenshots.
 - `shared/physics.js`: shared cannon-es bodies and server-authoritative movement, dive, collision, falling, see-saw, and disappearing-tile behavior.
 - `client/scene.js`: low-poly Three.js renderer, bean models, obstacle animation, follow camera, and theme rendering.
 - `client/client.js`: room UI, Socket.IO sync, client prediction, reconciliation, scoreboard, and round HUD.
+- `client/netcode.js`: bounded remote interpolation, brief extrapolation, and local fixed-tick render interpolation.
 - `scripts/generate-map.js`: deterministic map JSON export.
 - `scripts/benchmark.js`: 30-player physics smoke benchmark.
 
@@ -125,11 +138,12 @@ These diagrams are for inspecting layouts; they are not gameplay screenshots.
 
 ```bash
 npm test
+npm run check-maps
 npm run build
 npm run benchmark
 ```
 
-The tests cover deterministic maps, every course family, route validation, timed-gate clearance, moving-platform carry, tile collapse and correction, pad launches, log colliders, eight-round transitions, all three finals, and two-client Socket.IO play. The benchmark measures server simulation cost for 30 synthetic test players; it does not measure browser FPS or guarantee performance on every host.
+The tests cover deterministic maps, every course family, route validation, timed-gate clearance, moving-platform carry, tile collapse and correction, pad launches, log colliders, eight-round transitions, all three finals, wall sticking, jump buffering, coyote jumps, dives, interpolation, camera transforms, and real Socket.IO movement, reset, reconnect, and elimination. Scene tests use a recording renderer; they do not validate GPU output. `check-maps` validates 1,500 generated maps across 500 seeds. The benchmark measures server simulation cost for 30 synthetic test players; it does not measure browser FPS or guarantee performance on every host.
 
 ## Networking and hosting notes
 
@@ -140,3 +154,5 @@ For more than one server process, add a Socket.IO compatible adapter and shared 
 ## Design reference
 
 [Fall Guys level catalogue](https://fallguysdb.com/levels/), reviewed on 5 October 2026. The catalogue is incomplete and many entries have no mechanic descriptions; the implementation also uses the obstacle requirements supplied for this project.
+
+[LOLBeans](https://lolbeans.io/) and its [official level-design guidance](https://editor-ldg.lolbeans.io/) informed camera options, clear round feedback, safe checkpoints, short falls, and varied challenges. Rumble Run retains its own code, art, and generated layouts.

@@ -5,11 +5,11 @@ import { generateMap, crownHeight } from '../shared/maps.js';
 import { PhysicsWorld } from '../shared/physics.js';
 
 export class Tournament extends EventEmitter {
-  constructor(code, { privateRoom = true, rounds = 6, seed = '', timings = {} } = {}) {
+  constructor(code, { privateRoom = true, rounds = 6, seed = '', difficulty = 'normal', playlist = 'mixed', timings = {} } = {}) {
     super();
     this.code = code;
     this.privateRoom = privateRoom;
-    this.settings = { rounds, seed };
+    this.settings = { rounds, seed, difficulty, playlist };
     this.rules = { ...RULES, ...timings };
     this.players = new Map();
     this.hostId = null;
@@ -28,7 +28,12 @@ export class Tournament extends EventEmitter {
     this.prepareCourses();
   }
   prepareCourses() {
-    this.courseDeck = Array.from({ length: this.settings.rounds }, (_, round) => generateMap({ seed: this.seed, round, type: roundType(round, this.settings.rounds), difficulty: round / this.settings.rounds }));
+    const offset = this.settings.difficulty === 'easy' ? -0.22 : this.settings.difficulty === 'hard' ? 0.25 : 0;
+    this.courseDeck = Array.from({ length: this.settings.rounds }, (_, round) => {
+      const final = round === this.settings.rounds - 1;
+      const type = final ? 'final' : this.settings.playlist === 'races' ? 'race' : roundType(round, this.settings.rounds);
+      return generateMap({ seed: this.seed, round, type, raceIndex: this.settings.playlist === 'races' ? round : Math.floor(round / 2), difficulty: Math.max(0, Math.min(1, round / (this.settings.rounds - 1) * 0.8 + offset)), variant: final && this.settings.playlist === 'races' ? 'crown-climb' : undefined });
+    });
   }
   get roundKey() { return `${this.tournamentId}:${this.round}`; }
   get humans() { return [...this.players.values()]; }
@@ -57,7 +62,7 @@ export class Tournament extends EventEmitter {
     if (id !== this.hostId || this.phase !== 'finished') throw new Error('The host can restart after the tournament.');
     for (const [key, p] of this.players) {
       if (!p.connected) this.players.delete(key);
-      else { p.active = true; p.status = 'waiting'; p.progress = 0; p.checkpoint = 0; }
+      else { p.active = true; p.status = 'waiting'; p.progress = 0; p.checkpoint = 0; delete p.eliminatedRound; }
     }
     this.phase = 'lobby'; this.phaseTime = 0; this.round = -1;
     this.map = null; this.physics = null; this.winner = null; this.results = [];
@@ -68,8 +73,8 @@ export class Tournament extends EventEmitter {
   }
 
   beginRound() {
-    const type = roundType(this.round, this.settings.rounds);
     this.map = this.courseDeck[this.round];
+    const type = this.map.type;
     this.physics = new PhysicsWorld(this.map);
     this.time = 0; this.phase = 'countdown'; this.phaseTime = 0;
     this.qualifiers = []; this.results = [];
@@ -79,7 +84,8 @@ export class Tournament extends EventEmitter {
     this.roundLimit = type === 'survival' ? this.rules.survivalSeconds : type === 'final' ? this.rules.finalSeconds : this.rules.raceSeconds;
     active.forEach((p, i) => {
       p.status = 'racing'; p.checkpoint = 0; p.progress = 0; p.falls = 0;
-      p.input = EMPTY_INPUT; p.pendingJump = false; p.pendingDive = false;
+      p.respawnUntil = 0; p.nextReset = 0;
+      p.input = EMPTY_INPUT; p.lastInput = this.time; p.pendingJump = false; p.pendingDive = false;
       p.pendingGrab = false; p.grabUntil = 0;
       this.physics.addPlayer(p.id, this.map.spawn[i]);
     });
@@ -97,6 +103,23 @@ export class Tournament extends EventEmitter {
     p.lastSeq = input.seq;
     p.lastInput = this.time;
     p.input = input;
+  }
+
+  respawn(p, position) {
+    this.physics.teleport(p.id, position);
+    p.falls++;
+    p.respawnUntil = this.time + 0.65;
+    p.nextReset = this.time + 2;
+    p.input = EMPTY_INPUT; p.pendingJump = false; p.pendingDive = false;
+    this.emit('player-event', { roundKey: this.roundKey, id: p.id, type: 'respawn', checkpoint: p.checkpoint });
+  }
+
+  resetCheckpoint(id) {
+    const p = this.players.get(id);
+    if (!p || this.phase !== 'playing' || p.status !== 'racing' || this.map.mode !== 'race') throw new Error('Checkpoint reset is available while racing.');
+    if (this.time < p.nextReset) throw new Error('Wait a moment before resetting again.');
+    const c = this.map.checkpoints[p.checkpoint];
+    this.respawn(p, [c.x, c.y + 0.4, c.z - 0.5]);
   }
 
   setConnected(id, connected) {
@@ -140,7 +163,7 @@ export class Tournament extends EventEmitter {
     const inputs = new Map();
     for (const p of this.competitors) {
       {
-        const valid = p.connected && this.time - p.lastInput <= RULES.inputTimeout;
+        const valid = p.connected && this.time >= p.respawnUntil && this.time - p.lastInput <= this.rules.inputTimeout;
         inputs.set(p.id, valid ? { ...p.input, jump: p.pendingJump, dive: p.pendingDive } : EMPTY_INPUT);
         if (valid && p.pendingGrab) p.grabUntil = this.time + 0.25;
         p.pendingGrab = false;
@@ -153,7 +176,7 @@ export class Tournament extends EventEmitter {
       const pp = this.physics.players.get(p.id);
       if (!pp) continue;
       const pos = pp.body.position;
-      const killY = this.map.slime ? this.map.slime.start + this.time * this.map.slime.speed + 0.5 : this.map.killY ?? -14;
+      const killY = this.map.slime ? this.map.slime.start + this.time * this.map.slime.speed + 0.5 : survival ? this.map.killY ?? -14 : this.map.checkpoints[p.checkpoint].y - 7;
       if (!Number.isFinite(pos.x + pos.y + pos.z) || pos.y < killY || Math.abs(pos.x) > 150) {
         if (survival) {
           // Preserve the final two in earlier rounds. Friend duels should
@@ -163,16 +186,17 @@ export class Tournament extends EventEmitter {
             const safe = [...this.physics.platforms.values()].filter(floor => !floor.removed && (floor.dropAt === null || floor.dropAt > this.time + 1) && floor.body.position.y + 1.7 > killY + 0.3)
               .sort((a, b) => b.body.position.y - a.body.position.y || Math.hypot(a.body.position.x, a.body.position.z) - Math.hypot(b.body.position.x, b.body.position.z))[0];
             if (!safe) { this.endRound(this.competitors.map(bean => bean.id)); return; }
-            this.physics.teleport(p.id, [safe.body.position.x, safe.body.position.y + 1.7, safe.body.position.z]);
-            p.falls++; pp.hits++;
+            this.respawn(p, [safe.body.position.x, safe.body.position.y + 1.7, safe.body.position.z]);
+            pp.hits++;
           } else {
             p.status = 'eliminated'; p.active = false; p.outAt = this.time;
+            p.eliminatedRound = this.round;
             this.physics.removePlayer(p.id);
+            this.emit('player-event', { roundKey: this.roundKey, id: p.id, type: 'eliminated' });
           }
         } else {
           const c = this.map.checkpoints[p.checkpoint];
-          this.physics.teleport(p.id, [c.x, c.y + 0.4, c.z - 0.5]);
-          p.falls++;
+          this.respawn(p, [c.x, c.y + 0.4, c.z - 0.5]);
         }
         continue;
       }
@@ -190,6 +214,7 @@ export class Tournament extends EventEmitter {
           p.finishTime = this.time;
           this.qualifiers.push(p.id);
           this.physics.removePlayer(p.id);
+          this.emit('player-event', { roundKey: this.roundKey, id: p.id, type: 'qualified' });
           if (this.qualifiers.length >= this.target) break;
         }
       }
@@ -217,6 +242,7 @@ export class Tournament extends EventEmitter {
     this.results = [...this.players.values()].filter(p => p.active || p.outAt !== undefined).map(p => ({ id: p.id, qualified: winners.includes(p.id), progress: p.progress, time: p.finishTime ?? null }));
     for (const p of this.players.values()) {
       p.active = winners.includes(p.id);
+      if (!p.active && p.eliminatedRound === undefined) p.eliminatedRound = this.round;
       p.status = p.active ? 'qualified' : 'eliminated';
       delete p.outAt; delete p.finishTime;
     }
@@ -234,6 +260,6 @@ export class Tournament extends EventEmitter {
   emitState() { this.emit('state', this.state()); }
   snapshot() {
     const phaseLeft = this.phase === 'playing' ? Math.max(0, this.roundLimit - this.time) : this.phase === 'countdown' ? Math.max(0, this.rules.countdown - this.phaseTime) : this.phase === 'results' ? Math.max(0, this.rules.intermission - this.phaseTime) : this.phase === 'lobby' && !this.privateRoom ? Math.max(0, 8 - this.phaseTime) : 0;
-    return { roundKey: this.roundKey, tick: this.tick, phase: this.phase, time: this.time, phaseLeft, target: this.target, qualified: this.qualifiers.length, alive: this.competitors.length, environment: this.physics?.environmentSnapshot(), players: [...this.players.values()].map(p => ({ ...this.physics?.snapshot(p.id), id: p.id, seq: p.lastSeq, status: p.status, progress: Math.round(p.progress * 100) / 100, checkpoint: p.checkpoint })) };
+    return { roundKey: this.roundKey, tick: this.tick, phase: this.phase, time: this.time, phaseLeft, target: this.target, qualified: this.qualifiers.length, alive: this.competitors.length, environment: this.physics?.environmentSnapshot(), players: [...this.players.values()].map(p => ({ ...this.physics?.snapshot(p.id), id: p.id, seq: p.lastSeq, status: p.status, respawnLeft: Math.max(0, (p.respawnUntil || 0) - this.time), falls: p.falls || 0, progress: Math.round(p.progress * 100) / 100, checkpoint: p.checkpoint })) };
   }
 }

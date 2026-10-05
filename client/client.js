@@ -5,6 +5,7 @@ import { PhysicsWorld } from '../shared/physics.js';
 import { generateMap } from '../shared/maps.js';
 import { GameScene } from './scene.js';
 import { InputController } from './input.js';
+import { samplePlayers, renderLocal } from './netcode.js';
 
 const $ = selector => document.querySelector(selector);
 const show = (selector, visible) => { $(selector).hidden = !visible; };
@@ -12,6 +13,19 @@ const text = (selector, value) => { $(selector).textContent = value; };
 const storage = { get(key, fallback = '') { try { return sessionStorage.getItem(key) ?? fallback; } catch { return fallback; } }, set(key, value) { try { if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, value); } catch { /* Storage is optional. */ } } };
 let toastTimer;
 function toast(message, sticky = false) { text('#toast', message); show('#toast', true); clearTimeout(toastTimer); if (!sticky) toastTimer = setTimeout(() => show('#toast', false), 4200); }
+let personalResultTimer, personalStatus = null;
+function hidePersonalResult() { clearTimeout(personalResultTimer); show('#personal-result', false); }
+function showPersonalResult(status) {
+  if (!['qualified', 'eliminated'].includes(status) || personalStatus === status) return;
+  personalStatus = status;
+  const qualified = status === 'qualified';
+  text('#personal-result-eyebrow', qualified ? 'ROUND UPDATE' : 'ROUND OVER');
+  text('#personal-result-title', qualified ? 'QUALIFIED!' : 'YOU’RE OUT');
+  text('#personal-result-detail', qualified ? 'Nice run. You can watch the remaining beans before the next course.' : 'That run is over, but you can spectate the rest of the round and rejoin the next match.');
+  show('#personal-result', true);
+  clearTimeout(personalResultTimer);
+  personalResultTimer = setTimeout(hidePersonalResult, qualified ? 2600 : 5200);
+}
 function fatal(message) { text('#fatal-message', message); show('#fatal', true); }
 $('#reload').onclick = () => location.reload();
 let view;
@@ -26,6 +40,8 @@ let networkRtt = 0, lastSnapshotAt = 0, localActionAt = -1000, packetAt = 0, sim
 let snapshotQueue = [], lastTick = -1, watching = null, soundEnabled = false, audioContext = null;
 let frameCount = 0, fpsAt = performance.now(), lastFrame = performance.now(), accumulator = 0, uiAt = 0;
 let renderStates = new Map();
+const correctionOffset = [0, 0, 0];
+let lastFalls = 0, lastCheckpoint = 0, respawnToastUntil = 0;
 const touch = matchMedia('(pointer: coarse)').matches;
 
 function beep(frequency = 500, duration = 0.1, kind = 'sine') {
@@ -63,7 +79,7 @@ function join(mode) {
   if (!$('#nickname').reportValidity()) return;
   storage.set('rumble-name', $('#nickname').value);
   $('#room-form button[type=submit]').disabled = true;
-  socket.timeout(7000).emit('join', { mode, name: $('#nickname').value, color: selectedColor, code: $('#room-code').value.trim(), rounds: Number($('#rounds').value), seed: $('#seed').value.trim() }, (err, result) => {
+  socket.timeout(7000).emit('join', { mode, name: $('#nickname').value, color: selectedColor, code: $('#room-code').value.trim(), rounds: Number($('#rounds').value), seed: $('#seed').value.trim(), difficulty: $('#difficulty').value, playlist: $('#playlist').value }, (err, result) => {
     $('#room-form button[type=submit]').disabled = false;
     if (err || result?.error) toast(result?.error || 'Could not join. Check your connection and try again.');
   });
@@ -71,6 +87,8 @@ function join(mode) {
 function request(event) { socket.timeout(5000).emit(event, (err, result) => { if (err || result?.error) toast(result?.error || 'The server did not respond. Please try again.'); }); }
 $('#start').onclick = () => request('start');
 $('#rematch').onclick = () => request('rematch');
+function resetCheckpoint() { if (state?.phase === 'playing' && state.map.mode === 'race') request('reset-checkpoint'); }
+$('#reset-checkpoint').onclick = () => { closeSettings(); resetCheckpoint(); };
 async function leave() {
   input.clear(); input.enabled = false;
   socket.timeout(4000).emit('leave', (err, result) => {
@@ -84,19 +102,37 @@ $('#copy-invite').onclick = async () => {
   try { await navigator.clipboard.writeText(url.href); toast('Invite copied. Send it to your friends.'); }
   catch { $('#invite-fallback').value = url.href; show('#invite-fallback', true); $('#invite-fallback').select(); toast('Copy the selected invite link, or share the room code.'); }
 };
-function openSettings() { input.clear(); input.enabled = false; $('#settings').showModal(); show('#leave-game', !!state); }
+function openSettings() { input.enabled = false; input.clear(); $('#settings').showModal(); show('#leave-game', !!state); }
 function closeSettings() { $('#settings').close(); updateInput(); document.activeElement?.blur(); }
 for (const id of ['settings-button', 'game-menu']) $(`#${id}`).onclick = openSettings;
 for (const id of ['close-settings', 'resume']) $(`#${id}`).onclick = closeSettings;
 $('#settings').addEventListener('close', () => { updateInput(); document.activeElement?.blur(); });
 $('#quality').onchange = e => { view.qualityMode(e.target.value); storage.set('rumble-quality', e.target.value); };
 $('#quality').value = storage.get('rumble-quality', touch ? 'low' : 'balanced'); view.qualityMode($('#quality').value || 'balanced');
+for (const [id, fallback, apply] of [
+  ['camera-fov', '58', value => view.cameraFov = Number(value)],
+  ['camera-distance', '11.5', value => view.cameraDistance = Number(value)],
+  ['camera-sensitivity', '1', value => input.sensitivity = Number(value)],
+  ['motion', view.reducedMotion ? 'reduced' : 'on', value => view.reducedMotion = value === 'reduced'],
+  ['names', 'on', value => view.showNames = value === 'on'],
+  ['shadows', 'on', value => view.showShadows = value === 'on'],
+]) {
+  const element = $(`#${id}`), saved = storage.get(`rumble-${id}`, fallback);
+  element.value = [...element.options].some(option => option.value === saved) ? saved : fallback;
+  apply(element.value); element.onchange = () => { apply(element.value); storage.set(`rumble-${id}`, element.value); };
+}
 $('#sound').onclick = () => { soundEnabled = !soundEnabled; $('#sound span').textContent = soundEnabled ? 'ON' : 'OFF'; $('#sound').setAttribute('aria-label', soundEnabled ? 'Mute sound' : 'Enable sound'); beep(660); };
 function toggleScore() { show('#scoreboard', $('#scoreboard').hidden); renderScore(); }
 $('#score-button').onclick = toggleScore; $('#close-score').onclick = () => show('#scoreboard', false);
 input.onToggleScore = toggleScore; input.onMenu = openSettings;
+input.onReset = resetCheckpoint;
+input.getYaw = () => view.cameraYaw;
+input.onLook = amount => { view.cameraYaw += amount; };
+input.onCenterCamera = () => { view.cameraYaw = 0; };
+input.onChange = () => { if (socket.connected && state?.phase === 'playing') socket.volatile.emit('input', input.packet(roundKey)); };
 input.onAction = action => { localActionAt = performance.now(); if (input.enabled && socket.connected) socket.volatile.emit('input', input.packet(roundKey)); if (action === 'jump') beep(380); if (action === 'dive') beep(180, 0.14, 'triangle'); };
 $('#next-player').onclick = () => { const ids = snapshot?.players.filter(p => p.p && p.status === 'racing').map(p => p.id) || []; watching = ids[(ids.indexOf(watching) + 1) % ids.length] || null; view.smoothInitialized = false; };
+$('#personal-result-watch').onclick = hidePersonalResult;
 
 socket.on('connect', () => { text('#connection', 'Connected · ready to play'); if (state) toast('Connected. Rejoining your match…'); updateInput(); });
 socket.on('connect_error', error => { text('#connection', 'Server unavailable'); toast(`Cannot connect to the game server. ${error.message === 'xhr poll error' ? 'Check that the server is running.' : 'Trying again…'}`); });
@@ -111,32 +147,61 @@ socket.on('welcome', data => {
   roundKey = null; applyState(data.state); show('#toast', false);
 });
 socket.on('state', applyState);
+socket.on('player-event', event => {
+  if (event.roundKey !== roundKey || event.id !== myId) return;
+  if (event.type === 'respawn') { respawnToastUntil = performance.now() + 850; correctionOffset.fill(0); view.smoothInitialized = false; }
+  else showPersonalResult(event.type);
+});
 socket.on('snapshot', data => {
   if (!state || data.roundKey !== roundKey || data.tick <= lastTick) return;
   lastTick = data.tick; lastSnapshotAt = performance.now(); snapshot = data;
+  // Align the clock before converting authoritative cooldowns into deadlines.
+  if (Math.abs(simulationTime - data.time) > 0.3) simulationTime = data.time + Math.min(0.08, networkRtt / 2000);
   snapshotQueue.push({ ...data, at: lastSnapshotAt }); if (snapshotQueue.length > 8) snapshotQueue.shift();
   for (const row of data.players) {
-    const player = state.players.find(p => p.id === row.id); if (player) player.status = row.status;
-    if (!physics || !row.p) continue;
+    const player = state.players.find(p => p.id === row.id), previousStatus = player?.status;
+    if (player) player.status = row.status;
+    if (row.id === myId && previousStatus !== row.status) showPersonalResult(row.status);
+    if (row.id === myId) {
+      if (row.falls > lastFalls) respawnToastUntil = performance.now() + 850;
+      if (row.checkpoint > lastCheckpoint) toast('Checkpoint reached');
+      lastFalls = row.falls || 0; lastCheckpoint = row.checkpoint || 0;
+    }
+    if (!physics) continue;
+    if (!row.p) { physics.removePlayer(row.id); continue; }
     let body = physics.players.get(row.id);
     if (!body) body = physics.addPlayer(row.id, row.p, row.id !== myId);
     if (row.id !== myId) {
-      body.body.position.set(...row.p); body.body.velocity.set(...row.v); continue;
+      body.body.position.set(...row.p); body.body.velocity.set(...row.v); body.body.aabbNeedsUpdate = true; continue;
     }
     const b = body.body, latency = Math.min(0.075, networkRtt / 2000);
     const desired = row.p.map((v, i) => v + row.v[i] * latency);
     const error = Math.hypot(...desired.map((v, i) => v - [b.position.x, b.position.y, b.position.z][i]));
     if (row.tp !== lastTeleport || error > 4) {
       physics.teleport(myId, row.p); b.velocity.set(...row.v); lastTeleport = row.tp;
+      body.teleports = row.tp; body.grounded = row.g; body.face = row.f;
+      body.respawnUntil = simulationTime + (row.respawnLeft || 0);
+      body.lastHit = simulationTime - RULES.hitCooldown;
+      body.diveUntil = simulationTime + row.d; body.diveRecoveryUntil = simulationTime + (row.r || 0);
+      body.nextDive = simulationTime + row.c; body.stunUntil = simulationTime + row.s;
+      body.airDiveUsed = !!row.airDiveUsed; body.hits = row.hits;
+      if (row.g) body.lastGround = simulationTime;
+      correctionOffset.fill(0); view.smoothInitialized = false;
     } else if (performance.now() - localActionAt > 140) {
-      if (error > 0.16) { b.position.x += (desired[0] - b.position.x) * 0.24; b.position.y += (desired[1] - b.position.y) * 0.35; b.position.z += (desired[2] - b.position.z) * 0.24; }
+      if (error > 0.12) {
+        for (const [i, key] of ['x', 'y', 'z'].entries()) {
+          const correction = (desired[i] - b.position[key]) * (i === 1 ? 0.32 : 0.22);
+          b.position[key] += correction; b.previousPosition[key] += correction; correctionOffset[i] -= correction;
+        }
+        b.aabbNeedsUpdate = true;
+      }
       b.velocity.x += (row.v[0] - b.velocity.x) * 0.15; b.velocity.z += (row.v[2] - b.velocity.z) * 0.15;
       if (!row.g || Math.abs(b.velocity.y) < 1) b.velocity.y += (row.v[1] - b.velocity.y) * 0.12;
-      body.diveUntil = simulationTime + row.d; body.nextDive = simulationTime + row.c; body.stunUntil = simulationTime + row.s;
+      body.diveUntil = simulationTime + row.d; body.diveRecoveryUntil = simulationTime + (row.r || 0); body.nextDive = simulationTime + row.c; body.stunUntil = simulationTime + row.s;
+      body.airDiveUsed = !!row.airDiveUsed; body.hits = row.hits;
     }
   }
   physics?.syncEnvironment(data.environment);
-  if (Math.abs(simulationTime - data.time) > 0.3) simulationTime = data.time + Math.min(0.08, networkRtt / 2000);
   updateInput();
 });
 setInterval(() => {
@@ -145,13 +210,18 @@ setInterval(() => {
 }, 2000);
 
 function resetMenu() {
+  hidePersonalResult(); personalStatus = null;
   state = null; snapshot = null; physics = null; roundKey = null; myId = null; snapshotQueue = []; renderStates.clear(); lastTick = -1;
   input.clear(); input.enabled = false; input.inGame = false; document.body.classList.remove('playing');
   for (const selector of ['#lobby', '#hud', '#round-result', '#scoreboard', '#touch-controls']) show(selector, false);
   show('#menu', true); $('#settings').close(); view.menu = true; view.loadMap(generateMap({ seed: 'candy-club' })); view.makeShowcase(); selectColor(selectedColor);
 }
 function applyState(next) {
+  const previousStatus = state?.players.find(p => p.id === myId)?.status;
   state = next;
+  const nextStatus = next.players.find(p => p.id === myId)?.status;
+  if (previousStatus !== nextStatus) showPersonalResult(nextStatus);
+  if (next.phase !== 'playing') hidePersonalResult();
   const inMatch = next.phase !== 'lobby';
   document.body.classList.toggle('playing', inMatch); view.menu = !inMatch;
   show('#menu', false); show('#lobby', !inMatch); show('#hud', inMatch);
@@ -161,6 +231,8 @@ function applyState(next) {
     if (roundKey !== next.roundKey && !view.showcase) { view.loadMap(generateMap({ seed: next.seed })); view.makeShowcase(); selectColor(selectedColor); }
     roundKey = next.roundKey; snapshot = null; physics = null; snapshotQueue = []; lastTick = -1; renderLobby();
   } else if (next.map && roundKey !== next.roundKey) {
+    hidePersonalResult(); personalStatus = null;
+    lastFalls = 0; lastCheckpoint = 0; respawnToastUntil = 0; correctionOffset.fill(0); view.cameraYaw = 0;
     roundKey = next.roundKey; snapshot = null; snapshotQueue = []; lastTick = -1; accumulator = 0; simulationTime = 0; lastTeleport = -1;
     physics = new PhysicsWorld(next.map); view.loadMap(next.map); view.menu = false; watching = null; input.clear();
     next.players.forEach((p, i) => {
@@ -183,7 +255,9 @@ function applyState(next) {
 }
 function updateInput() {
   const own = state?.players.find(p => p.id === myId);
-  input.enabled = !!(socket.connected && state?.phase === 'playing' && own?.status === 'racing' && !$('#settings').open);
+  input.enabled = !!(socket.connected && state?.phase === 'playing' && own?.status === 'racing' && !(snapshot?.players.find(p => p.id === myId)?.respawnLeft > 0) && !$('#settings').open);
+  input.inGame = !!(state && state.phase !== 'lobby');
+  $('#reset-checkpoint').hidden = !(state?.phase === 'playing' && state.map.mode === 'race' && own?.status === 'racing');
   show('#touch-controls', touch && input.enabled);
 }
 function renderLobby() {
@@ -215,12 +289,12 @@ function renderLobby() {
 }
 function renderResult() {
   const finished = state.phase === 'finished', qualified = state.qualifiers.includes(myId), winner = state.players.find(p => p.id === state.winner);
-  text('#result-eyebrow', finished ? 'THAT’S A WRAP' : `ROUND ${state.round + 1} COMPLETE`);
-  text('#result-title', finished ? state.winner === myId ? 'Crown secured!' : winner ? `${winner.name} wins!` : 'No beans left!' : qualified ? 'You’re through!' : 'A noble rumble.');
-  text('#result-detail', finished ? 'Same friends. New courses. Another shot at the crown?' : qualified ? `${state.qualifiers.length} beans move on. Get ready for the next course.` : 'You’re out of the running. Stick around and cheer on your friends.');
+  text('#result-eyebrow', finished ? 'THAT’S A WRAP' : qualified ? `ROUND ${state.round + 1} COMPLETE` : 'ELIMINATED');
+  text('#result-title', finished ? state.winner === myId ? 'Crown secured!' : winner ? `${winner.name} wins!` : 'No beans left!' : qualified ? 'You’re through!' : 'You’re out.');
+  text('#result-detail', finished ? 'Same friends. New courses. Another shot at the crown?' : qualified ? `${state.qualifiers.length} beans move on. Get ready for the next course.` : 'Your run ended this round. Watch your friends or leave when you’re ready.');
   $('#result-names').replaceChildren();
   for (const id of state.qualifiers) { const p = state.players.find(p => p.id === id); if (!p) continue; const tag = document.createElement('span'); tag.className = 'result-name'; tag.textContent = p.name; $('#result-names').append(tag); }
-  show('#rematch', finished && state.hostId === myId); show('#result-leave', finished);
+  show('#rematch', finished && state.hostId === myId); show('#result-leave', finished || !qualified);
   text('#next-round-time', finished && state.hostId !== myId ? 'Waiting for the host to open the next lobby.' : '');
   beep(qualified || state.winner === myId ? 880 : 250, 0.25);
 }
@@ -244,15 +318,18 @@ function updateHud(now) {
     if (!state.privateRoom && snapshot && state.players.filter(p => p.connected).length >= 2) text('#start', `Starting in ${Math.ceil(snapshot.phaseLeft)}…`);
     return;
   }
-  const left = Math.ceil(snapshot?.phaseLeft ?? (state.phase === 'countdown' ? 3 : 95));
+  const left = Math.ceil(snapshot?.phaseLeft ?? (state.phase === 'countdown' ? RULES.countdown : RULES.raceSeconds));
   text('#timer', `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`);
   const survival = state.map.mode === 'survival';
   text('#qualify-label', survival ? 'STILL STANDING' : state.map.type === 'final' ? 'ONE CROWN' : 'QUALIFIED');
   text('#qualified', survival ? `${snapshot?.alive ?? state.players.filter(p => p.active).length}` : `${snapshot?.qualified || 0} / ${state.target}`);
   text('#countdown', state.phase === 'countdown' ? Math.max(1, left) : '');
   const own = snapshot?.players.find(p => p.id === myId), spectator = own?.status && own.status !== 'racing';
+  show('#respawn-banner', state.phase === 'playing' && own?.status === 'racing' && now < respawnToastUntil);
+  text('#respawn-banner', state.map.mode === 'race' ? 'WHOOPS! BACK TO CHECKPOINT' : 'WHOOPS! BACK IN THE ROUND');
+  show('#dive-meter', input.enabled);
   show('#status-banner', state.phase === 'playing' && !!spectator);
-  text('#status-banner', own?.status === 'qualified' ? 'QUALIFIED!' : 'ELIMINATED');
+  text('#status-banner', own?.status === 'qualified' ? 'QUALIFIED · WATCHING' : 'YOU’RE OUT · WATCHING');
   show('#spectator', state.phase === 'playing' && !!spectator);
   const watched = state.players.find(p => p.id === watching); text('#watching', watched ? `Watching ${watched.name}` : 'Waiting for the next round');
   if (state.phase === 'results') text('#next-round-time', `Next course in ${left}…`);
@@ -264,46 +341,40 @@ function updateHud(now) {
   renderScore();
 }
 function interpolatePlayers(now) {
+  if (snapshotQueue.length) return samplePlayers(snapshotQueue, now);
   const result = new Map();
-  if (!snapshotQueue.length) {
-    for (const p of state?.players || []) { const body = physics?.snapshot(p.id); if (body) result.set(p.id, body); }
-    return result;
-  }
-  const renderAt = now - 100;
-  let a = snapshotQueue[0], b = snapshotQueue.at(-1);
-  for (let i = 0; i < snapshotQueue.length - 1; i++) if (snapshotQueue[i].at <= renderAt && snapshotQueue[i + 1].at >= renderAt) { a = snapshotQueue[i]; b = snapshotQueue[i + 1]; break; }
-  const t = Math.max(0, Math.min(1, (renderAt - a.at) / Math.max(1, b.at - a.at)));
-  for (const p of b.players) {
-    const previous = a.players.find(q => q.id === p.id);
-    if (!p.p) { result.set(p.id, p); continue; }
-    const sameTeleport = previous?.p && p.tp === previous.tp;
-    const pos = sameTeleport ? p.p.map((n, i) => previous.p[i] + (n - previous.p[i]) * t) : p.p;
-    result.set(p.id, { ...p, p: pos });
-  }
+  for (const p of state?.players || []) { const body = physics?.snapshot(p.id); if (body) result.set(p.id, body); }
   return result;
 }
 function frame(now) {
   const delta = Math.min((now - lastFrame) / 1000, 0.1); lastFrame = now;
   accumulator += delta;
+  input.pollGamepad(delta);
   if (input.enabled && socket.connected && now - packetAt >= 1000 / 30) { socket.volatile.emit('input', input.packet(roundKey)); packetAt = now; }
   let steps = 0;
   while (accumulator >= DT && steps < 5) {
-    if (physics && state?.phase === 'playing' && input.enabled) { simulationTime += DT; physics.step(new Map([[myId, input.consume()]]), simulationTime); }
+    if (physics && socket.connected && state?.phase === 'playing' && state.players.find(p => p.id === myId)?.status === 'racing') { simulationTime += DT; physics.step(new Map([[myId, input.consume()]]), simulationTime); }
     accumulator -= DT; steps++;
   }
   if (steps === 5) accumulator = 0;
   renderStates = interpolatePlayers(now);
   const own = snapshot?.players.find(p => p.id === myId);
-  if (physics && input.enabled && (!own || own.status === 'racing')) { const local = physics.snapshot(myId); if (local) renderStates.set(myId, local); }
-  let follow = renderStates.get(myId)?.p;
+  correctionOffset.forEach((v, i) => correctionOffset[i] = v * Math.exp(-delta * 12));
+  if (physics && state?.phase === 'playing' && socket.connected && (!own || own.status === 'racing')) {
+    const local = physics.snapshot(myId), body = physics.players.get(myId);
+    if (local && body) { local.p = renderLocal(body, accumulator / DT, correctionOffset); renderStates.set(myId, local); }
+  }
+  let followState = renderStates.get(myId);
+  let follow = followState?.p;
   if (!follow) {
     if (!renderStates.get(watching)?.p) watching = [...renderStates.values()].find(p => p.p)?.id || null;
-    follow = renderStates.get(watching)?.p;
+    followState = renderStates.get(watching);
+    follow = followState?.p;
   }
   if (!follow && state?.map) follow = state.map.spawn[0];
   const time = state?.phase === 'playing' ? (snapshot?.time || 0) + Math.min(0.2, (now - lastSnapshotAt) / 1000) : snapshot?.time || 0;
   for (const p of state?.players || []) view.updateAvatar(p.id, renderStates.get(p.id), time, delta);
-  view.render(delta, state ? time : now / 1000, follow, now / 1000, snapshot?.environment);
+  view.render(delta, state ? time : now / 1000, follow, followState, now / 1000, snapshot?.environment);
   if (now - uiAt > 100) { updateHud(now); uiAt = now; }
   frameCount++;
   if (now - fpsAt > 1000) { text('#fps', `${Math.round(frameCount * 1000 / (now - fpsAt))} FPS`); frameCount = 0; fpsAt = now; }

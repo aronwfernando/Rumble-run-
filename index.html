@@ -31,6 +31,8 @@
         <div id="match-options" hidden>
           <label for="rounds">Rounds <select id="rounds"><option>4</option><option>5</option><option selected>6</option><option>7</option><option>8</option></select></label>
           <label for="seed">Map seed <input id="seed" maxlength="40" placeholder="Random every match" /></label>
+          <label for="difficulty">Difficulty <select id="difficulty"><option value="easy">Chill</option><option value="normal" selected>Standard</option><option value="hard">Challenging</option></select></label>
+          <label for="playlist">Playlist <select id="playlist"><option value="mixed">Race + survival</option><option value="races">Races + crown final</option></select></label>
         </div>
       </form>
       <p class="menu-note">Human players only. Fresh courses every match.</p>
@@ -57,13 +59,36 @@
     <div class="hud-right"><div id="timer">1:30</div><div class="qualify-box"><span id="qualify-label">QUALIFIED</span><strong id="qualified">0 / 20</strong></div></div>
     <div id="countdown" aria-live="polite"></div>
     <div id="status-banner" hidden></div>
+    <div id="respawn-banner" role="status" hidden>WHOOPS! BACK TO CHECKPOINT</div>
     <div class="hud-bottom"><div class="telemetry"><span id="net-status">Connecting…</span><span id="fps">60 FPS</span></div><button id="score-button" class="small-button">Players <kbd>Tab</kbd></button><button id="game-menu" class="small-button">Menu <kbd>Esc</kbd></button></div>
     <div id="spectator" hidden><span id="watching">Watching</span><button id="next-player" class="light-button">Next player</button></div>
     <div id="dive-meter"><span>⇢</span><div><strong>DIVE READY</strong><small>SHIFT / F</small></div><div id="dive-fill"></div></div>
   </section>
   <div id="round-result" class="centered" hidden><div class="result-card panel"><span id="result-eyebrow" class="eyebrow pink">ROUND COMPLETE</span><h2 id="result-title">Qualified!</h2><p id="result-detail"></p><div id="result-names"></div><p id="next-round-time"></p><button id="rematch" class="primary large" hidden>Back to lobby</button><button id="result-leave" class="text-button" hidden>Leave room</button></div></div>
+  <div id="personal-result" class="centered" hidden aria-live="assertive"><div class="result-card panel personal-result-card"><span id="personal-result-eyebrow" class="eyebrow pink">ROUND UPDATE</span><h2 id="personal-result-title">YOU’RE OUT</h2><p id="personal-result-detail"></p><button id="personal-result-watch" class="primary large">Watch the round</button></div></div>
   <aside id="scoreboard" class="panel" hidden><div class="panel-heading"><h3>THE LINEUP</h3><button id="close-score" class="icon-button" aria-label="Close player list">×</button></div><div id="score-list"></div></aside>
-  <dialog id="settings"><div class="panel-heading"><h2>Take a breather.</h2><button id="close-settings" class="icon-button" aria-label="Close settings">×</button></div><p>The match keeps running while this is open.</p><label for="quality">Graphics <select id="quality"><option value="low">Low · fastest</option><option value="balanced" selected>Balanced</option><option value="high">High</option></select></label><div class="instructions"><div><kbd>W A S D</kbd><span>Move · or arrow keys</span></div><div><kbd>SPACE</kbd><span>Jump</span></div><div><kbd>SHIFT / F</kbd><span>Dive</span></div><div><kbd>E</kbd><span>Grab the crown while jumping</span></div><div><kbd>TAB</kbd><span>Player list</span></div></div><button id="resume" class="primary large">Back to it</button><button id="leave-game" class="text-button" hidden>Leave match</button></dialog>
+  <dialog id="settings">
+    <div class="panel-heading"><h2>Make it yours.</h2><button id="close-settings" class="icon-button" aria-label="Close settings">×</button></div>
+    <p>The match keeps running while this is open.</p>
+    <label for="quality">Graphics <select id="quality"><option value="low">Low · fastest</option><option value="balanced" selected>Balanced</option><option value="high">High</option></select></label>
+    <label for="camera-fov">Field of view <select id="camera-fov"><option value="50">Close · 50°</option><option value="58" selected>Standard · 58°</option><option value="68">Wide · 68°</option><option value="78">Extra wide · 78°</option></select></label>
+    <label for="camera-distance">Camera distance <select id="camera-distance"><option value="8.5">Close</option><option value="11.5" selected>Standard</option><option value="15">Far</option></select></label>
+    <label for="camera-sensitivity">Look sensitivity <select id="camera-sensitivity"><option value="0.6">Low</option><option value="1" selected>Normal</option><option value="1.5">High</option></select></label>
+    <label for="motion">Motion effects <select id="motion"><option value="on">On</option><option value="reduced">Reduced</option></select></label>
+    <label for="names">Player names <select id="names"><option value="on">Show</option><option value="off">Hide</option></select></label>
+    <label for="shadows">Bean shadows <select id="shadows"><option value="on">On</option><option value="off">Off</option></select></label>
+    <div class="instructions">
+      <div><kbd>W A S D</kbd><span>Move · or arrow keys</span></div>
+      <div><kbd>SPACE / RIGHT CLICK</kbd><span>Jump</span></div>
+      <div><kbd>SHIFT / F</kbd><span>Dive</span></div>
+      <div><kbd>DRAG / C</kbd><span>Look around / recenter</span></div>
+      <div><kbd>E</kbd><span>Grab crown while jumping</span></div>
+      <div><kbd>R</kbd><span>Reset to checkpoint · race only</span></div>
+      <div><kbd>GAMEPAD</kbd><span>Left stick move · right stick look<br>A jump · B dive · X crown</span></div>
+    </div>
+    <button id="reset-checkpoint" class="light-button" hidden>Stuck? Reset to checkpoint</button>
+    <button id="resume" class="primary large">Back to it</button><button id="leave-game" class="text-button" hidden>Leave match</button>
+  </dialog>
   <div id="touch-controls" hidden><div id="joystick" aria-label="Drag to move"><div id="stick"></div></div><div class="touch-actions"><button id="touch-grab" aria-label="Grab crown">GRAB</button><button id="touch-dive" aria-label="Dive">DIVE</button><button id="touch-jump" aria-label="Jump">JUMP</button></div></div>
   <footer id="control-strip"><span><kbd>W A S D</kbd> Move</span><span><kbd>SPACE</kbd> Jump</span><span><kbd>SHIFT</kbd> Dive</span><span class="footer-note">Made for friendly rivalry.</span><span id="connection">Connecting…</span></footer>
   <div id="toast" role="status" hidden></div>

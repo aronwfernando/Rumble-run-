@@ -14,9 +14,11 @@ export class PhysicsWorld {
     this.time = 0;
     this.world = new CANNON.World({ gravity: new CANNON.Vec3(0, RULES.gravity, 0), allowSleep: false });
     this.world.broadphase = new CANNON.SAPBroadphase(this.world);
-    this.world.solver.iterations = 8;
-    this.world.defaultContactMaterial.friction = 0.02;
-    this.world.defaultContactMaterial.restitution = 0.06;
+    this.world.solver.iterations = 10;
+    // Horizontal grip is handled by the controller. Solver friction against
+    // a wall can otherwise cancel gravity while the motor pushes into it.
+    this.world.defaultContactMaterial.friction = 0;
+    this.world.defaultContactMaterial.restitution = 0;
     this.players = new Map();
     this.platforms = new Map();
     this.hazards = new Map();
@@ -45,14 +47,16 @@ export class PhysicsWorld {
 
   addPlayer(id, spawn, remote = false) {
     if (this.players.has(id)) return this.players.get(id);
-    const body = new CANNON.Body({ mass: remote ? 0 : 1, type: remote ? CANNON.Body.KINEMATIC : CANNON.Body.DYNAMIC, fixedRotation: true, linearDamping: 0.04, position: vec(spawn), collisionFilterGroup: 2, collisionFilterMask: remote ? 0 : 3 });
+    // Beans never hard-lock one another in a crowd. They still collide with
+    // every course collider, while remote render-only bodies stay nonphysical.
+    const body = new CANNON.Body({ mass: remote ? 0 : 1, type: remote ? CANNON.Body.KINEMATIC : CANNON.Body.DYNAMIC, fixedRotation: true, linearDamping: 0.015, position: vec(spawn), collisionFilterGroup: 2, collisionFilterMask: remote ? 0 : 1 });
     // Three overlapping spheres approximate a vertical capsule cheaply.
     for (const y of [-0.35, 0, 0.35]) body.addShape(new CANNON.Sphere(RULES.radius), new CANNON.Vec3(0, y, 0));
     body.updateMassProperties();
-    const p = { id, body, remote, grounded: false, lastGround: -10, jumpBuffer: -10, diveUntil: 0, nextDive: 0, stunUntil: 0, lastHit: -10, hits: 0, face: 0, teleports: 0, ray: new CANNON.RaycastResult(), input: EMPTY_INPUT };
+    const p = { id, body, remote, grounded: false, lastGround: -10, jumpBuffer: -10, diveUntil: 0, diveRecoveryUntil: 0, nextDive: 0, airDiveUsed: false, stunUntil: 0, respawnUntil: 0, lastHit: -10, hits: 0, face: 0, teleports: 0, ray: new CANNON.RaycastResult(), input: EMPTY_INPUT };
     body.addEventListener('collide', event => {
       const h = event.body.hazard;
-      if (!h || remote || this.time - p.lastHit < 0.8) return;
+      if (!h || remote || this.time < p.respawnUntil || this.time - p.lastHit < RULES.hitCooldown) return;
       const impact = Math.abs(event.contact.getImpactVelocityAlongNormal());
       if (h.kind === 'door') {
         if (h.breakable && Math.hypot(body.velocity.x, body.velocity.z) > 4) this.pendingBreaks.add(h.id);
@@ -60,6 +64,7 @@ export class PhysicsWorld {
       }
       if (h.kind === 'flipper' || h.kind === 'jump-pad') {
         p.lastHit = this.time;
+        p.stunUntil = 0;
         body.velocity.y = h.kind === 'jump-pad' ? 12.5 : 11;
         body.velocity.z -= h.kind === 'jump-pad' ? 4 : 12;
         return;
@@ -67,7 +72,8 @@ export class PhysicsWorld {
       if (impact < 1.6 && h.kind !== 'bumper') return;
       p.lastHit = this.time;
       p.hits++;
-      p.stunUntil = this.time + 0.3;
+      p.stunUntil = this.time + RULES.stunDuration;
+      p.diveUntil = this.time;
       let dx = body.position.x - event.body.position.x;
       let dz = body.position.z - event.body.position.z;
       const l = Math.hypot(dx, dz) || 1;
@@ -100,6 +106,11 @@ export class PhysicsWorld {
     p.jumpBuffer = -10;
     p.lastGround = -10;
     p.diveUntil = 0;
+    p.diveRecoveryUntil = 0;
+    p.airDiveUsed = false;
+    p.stunUntil = 0;
+    p.respawnUntil = this.time + RULES.respawnGrace;
+    p.lastHit = this.time;
     p.teleports++;
   }
 
@@ -146,14 +157,15 @@ export class PhysicsWorld {
       if (p.remote) continue;
       const b = p.body;
       const input = inputs.get(p.id) || EMPTY_INPUT;
+      p.input = input;
       p.ray.reset();
       this.world.raycastClosest(b.position, new CANNON.Vec3(b.position.x, b.position.y - RULES.halfHeight - 0.13, b.position.z), { collisionFilterMask: 1, skipBackfaces: true }, p.ray);
       p.grounded = p.ray.hasHit && p.ray.hitNormalWorld.y > 0.5 && b.velocity.y < 2.5;
-      if (p.grounded) p.lastGround = time;
+      if (p.grounded) { p.lastGround = time; p.airDiveUsed = false; }
       const floor = p.ray.hasHit ? this.platforms.get(p.ray.body?.platformId) : null;
       if (p.grounded && floor?.data.fallOnTouch && floor.dropAt === null) floor.dropAt = time + (floor.data.collapseDelay ?? 0.65);
       if (input.jump) p.jumpBuffer = time;
-      if (time - p.jumpBuffer < 0.12 && time - p.lastGround < RULES.coyoteTime && time >= p.stunUntil) {
+      if (time - p.jumpBuffer < RULES.jumpBuffer && time - p.lastGround < RULES.coyoteTime && time >= p.stunUntil) {
         b.velocity.y = RULES.jumpSpeed;
         p.jumpBuffer = -10;
         p.lastGround = -10;
@@ -162,28 +174,44 @@ export class PhysicsWorld {
       let x = clamp(Number(input.x) || 0, -1, 1), z = clamp(Number(input.z) || 0, -1, 1);
       const len = Math.hypot(x, z);
       if (len > 1) { x /= len; z /= len; }
-      if (len > 0.1) p.face = Math.atan2(-x, -z);
-      if (input.dive && time >= p.nextDive && time >= p.stunUntil) {
-        const fx = len > 0.1 ? x / Math.max(1, len) : -Math.sin(p.face);
-        const fz = len > 0.1 ? z / Math.max(1, len) : -Math.cos(p.face);
+      if (len > 0.1 && time >= p.diveUntil) p.face = Math.atan2(-x, -z);
+      if (input.dive && !p.airDiveUsed && time >= p.nextDive && time >= p.stunUntil) {
+        const directionLength = Math.hypot(x, z);
+        const fx = len > 0.1 ? x / directionLength : -Math.sin(p.face);
+        const fz = len > 0.1 ? z / directionLength : -Math.cos(p.face);
         b.velocity.x = fx * RULES.diveSpeed;
         b.velocity.z = fz * RULES.diveSpeed;
-        b.velocity.y = Math.max(b.velocity.y, 3.2);
+        b.velocity.y = Math.max(b.velocity.y, RULES.diveLift);
         p.diveUntil = time + RULES.diveDuration;
+        p.diveRecoveryUntil = p.diveUntil + RULES.diveRecovery;
         p.nextDive = time + RULES.diveCooldown;
+        p.airDiveUsed = true;
+        p.face = Math.atan2(-fx, -fz);
       }
-      if (time > p.diveUntil) {
+      if (time >= p.diveUntil) {
         const ice = p.grounded && floor?.data.surface === 'ice';
         const belt = p.grounded ? floor?.data.conveyor || [0, 0] : [0, 0];
         const turn = p.grounded ? floor?.data.turntable || 0 : 0;
         const carryX = turn ? turn * (b.position.z - floor.body.position.z) : 0;
         const carryZ = turn ? -turn * (b.position.x - floor.body.position.x) : 0;
-        const rate = (p.grounded ? RULES.acceleration : RULES.airAcceleration) * DT * (time < p.stunUntil ? 0.16 : 1) * (ice ? 0.19 : 1);
-        b.velocity.x += clamp(x * RULES.speed + belt[0] + carryX - b.velocity.x, -rate, rate);
-        b.velocity.z += clamp(z * RULES.speed + belt[1] + carryZ - b.velocity.z, -rate, rate);
+        const moving = len > 0.1;
+        const baseRate = p.grounded
+          ? (moving ? RULES.acceleration : RULES.deceleration)
+          : (moving ? RULES.airAcceleration : RULES.airDeceleration);
+        const surfaceRate = ice ? (moving ? RULES.iceAcceleration : RULES.iceDeceleration) : baseRate;
+        const stunControl = time < p.stunUntil ? 0.16 : 1;
+        const recoveryControl = time < p.diveRecoveryUntil ? 0.38 : 1;
+        const rate = surfaceRate * DT * stunControl * recoveryControl;
+        const targetX = x * RULES.speed + belt[0] + carryX;
+        const targetZ = z * RULES.speed + belt[1] + carryZ;
+        const changeX = targetX - b.velocity.x, changeZ = targetZ - b.velocity.z;
+        const steering = Math.min(1, rate / (Math.hypot(changeX, changeZ) || 1));
+        b.velocity.x += changeX * steering;
+        b.velocity.z += changeZ * steering;
+
       }
       const speed = Math.hypot(b.velocity.x, b.velocity.z);
-      if (speed > 25) { b.velocity.x *= 25 / speed; b.velocity.z *= 25 / speed; }
+      if (speed > RULES.maxSpeed) { b.velocity.x *= RULES.maxSpeed / speed; b.velocity.z *= RULES.maxSpeed / speed; }
       b.velocity.y = clamp(b.velocity.y, -45, 18);
     }
     this.world.step(DT);
@@ -222,6 +250,6 @@ export class PhysicsWorld {
     if (!p) return null;
     const b = p.body;
     const q = n => Math.round(n * 1000) / 1000;
-    return { id, p: [q(b.position.x), q(b.position.y), q(b.position.z)], v: [q(b.velocity.x), q(b.velocity.y), q(b.velocity.z)], f: q(p.face), g: p.grounded, d: q(Math.max(0, p.diveUntil - this.time)), c: q(Math.max(0, p.nextDive - this.time)), s: q(Math.max(0, p.stunUntil - this.time)), hits: p.hits, tp: p.teleports };
+    return { id, p: [q(b.position.x), q(b.position.y), q(b.position.z)], v: [q(b.velocity.x), q(b.velocity.y), q(b.velocity.z)], f: q(p.face), g: p.grounded, d: q(Math.max(0, p.diveUntil - this.time)), r: q(Math.max(0, p.diveRecoveryUntil - this.time)), c: q(Math.max(0, p.nextDive - this.time)), s: q(Math.max(0, p.stunUntil - this.time)), airDiveUsed: p.airDiveUsed, hits: p.hits, tp: p.teleports };
   }
 }

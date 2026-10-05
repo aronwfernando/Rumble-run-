@@ -51,6 +51,7 @@ export async function createGameServer({ dev = false, maxRooms = numberEnv('MAX_
     do { code = randomBytes(4).toString('hex').slice(0, 6).toUpperCase(); } while (rooms.has(code));
     const room = new Tournament(code, { privateRoom, ...settings, timings });
     room.on('state', state => io.to(code).emit('state', state));
+    room.on('player-event', event => io.to(code).emit('player-event', event));
     rooms.set(code, room);
     return room;
   }
@@ -113,6 +114,11 @@ export async function createGameServer({ dev = false, maxRooms = numberEnv('MAX_
     socket.on('start', ack => {
       if (typeof ack !== 'function' || !miscBucket.take()) return;
       try { const room = rooms.get(socket.data.code); if (!room) throw new Error('Join a room first.'); room.start(socket.data.playerId); ack({ ok: true }); } catch (e) { ack({ error: e.message }); }
+    });
+    socket.on('reset-checkpoint', ack => {
+      if (typeof ack !== 'function' || !miscBucket.take()) return;
+      try { const room = rooms.get(socket.data.code); if (!room) throw new Error('Join a room first.'); room.resetCheckpoint(socket.data.playerId); ack({ ok: true }); }
+      catch (e) { ack({ error: e.message }); }
     });
     socket.on('rematch', ack => {
       if (typeof ack !== 'function' || !miscBucket.take()) return;

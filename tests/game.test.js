@@ -82,3 +82,41 @@ test('two friends can fall in an early survival round without ending their tourn
   assert.equal(friend.falls, 1);
   assert.ok(room.physics.players.get(host.id).body.position.y > room.map.killY);
 });
+
+test('checkpoint reset is authoritative, counted, rate-limited, and unavailable in survival', () => {
+  const room = new Tournament('RESET0', { timings: { countdown: 0 } });
+  const a = room.addHuman({ name: 'A' }); room.addHuman({ name: 'B' });
+  const events = []; room.on('player-event', event => events.push(event));
+  room.start(a.id); room.step();
+  const checkpoint = room.map.checkpoints[1]; a.checkpoint = 1;
+  room.resetCheckpoint(a.id);
+  assert.equal(a.falls, 1);
+  assert.ok(room.snapshot().players.find(p => p.id === a.id).respawnLeft > 0);
+  assert.equal(room.physics.snapshot(a.id).p[0], Math.round(checkpoint.x * 1000) / 1000);
+  assert.equal(events.at(-1).type, 'respawn');
+  assert.throws(() => room.resetCheckpoint(a.id), /moment/);
+  room.round = 1; room.beginRound(); room.step();
+  assert.throws(() => room.resetCheckpoint(a.id), /racing/);
+});
+
+test('survival elimination emits reliable feedback before transitioning rounds', () => {
+  const room = new Tournament('OUT000', { rounds: 4, timings: { countdown: 0 } });
+  const players = Array.from({ length: 4 }, (_, i) => room.addHuman({ name: 'Bean' + i }));
+  room.round = 1; room.beginRound(); room.step();
+  const events = []; room.on('player-event', event => events.push(event));
+  room.physics.teleport(players[0].id, [0, -50, 0]); room.step();
+  assert.equal(events[0].type, 'eliminated');
+  assert.equal(events[0].id, players[0].id);
+  assert.equal(room.players.get(players[0].id).status, 'eliminated');
+  assert.equal(room.physics.players.has(players[0].id), false);
+});
+
+test('race-only tournaments have unique race families and difficulty options affect hazards', () => {
+  const normal = new Tournament('RACES0', { seed: 'playlist-test', rounds: 8, playlist: 'races' });
+  assert.equal(new Set(normal.courseDeck.slice(0, -1).map(m => m.family)).size, 7);
+  assert.ok(normal.courseDeck.every(m => m.mode === 'race'));
+  assert.equal(normal.courseDeck.at(-1).finale, 'crown-climb');
+  const hard = new Tournament('HARD00', { seed: 'playlist-test', rounds: 8, playlist: 'races', difficulty: 'hard' });
+  assert.ok(hard.courseDeck[0].difficulty > normal.courseDeck[0].difficulty);
+  assert.equal(cleanSettings({ difficulty: 'broken', playlist: 'broken' }).difficulty, 'normal');
+});
