@@ -1,0 +1,18 @@
+{
+  "seeds": 1000,
+  "maps": 5000,
+  "uniqueRaceLayouts": 1000,
+  "raceFamilies": 8,
+  "arenaRules": 23,
+  "presets": 23,
+  "difficulties": 11,
+  "validatedSpawnsPerMap": 30,
+  "maxPlatforms": 111,
+  "maxHazards": 38,
+  "invalid": 0,
+  "rejected": 0,
+  "fallbacks": 0,
+  "elapsedMs": 4410,
+  "failures": [],
+  "scope": "Finite geometry, spawn support, permanent race connectivity, ordered checkpoints, secret-path resolution and manifest integrity. This does not prove hazard timing, human difficulty, or collision-free camera paths. No rejection/fallback search is implemented yet."
+}

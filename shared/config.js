@@ -1,6 +1,6 @@
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 export const TICK_RATE = 60;
-export const SNAPSHOT_RATE = 20;
+export const SNAPSHOT_RATE = 15;
 export const DT = 1 / TICK_RATE;
 export const MAX_PLAYERS = 30;
 export const COLORS = ['#ff658c', '#6de8ce', '#ffcf56', '#8975ff', '#56c9ff', '#ff975f'];

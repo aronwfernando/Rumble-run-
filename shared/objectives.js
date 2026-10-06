@@ -1,0 +1,27 @@
+export const OBJECTIVES = Object.freeze(Object.fromEntries([
+  ['memory','Memory Meadow','Memorise the symbols, then stand on the announced symbol.',true,0],
+  ['rolling','Barrel Border','Cross between rolling bands. Keep clear of the gaps.',true,0],
+  ['tail','Ribbon Rush','Press E near a ribbon carrier to steal. Hold a ribbon at the horn.',false,0],
+  ['collection','Nest Quest','E picks up or throws an egg. Keep eggs inside your team nest.',false,3],
+  ['football','Bean Ball','Push the ball through the opposing goal. Most goals wins.',false,2],
+  ['basketball','Sky Baskets','Carry with E, then E to throw into the opposing basket.',false,2],
+  ['volleyball','Cloud Volley','Keep the ball off your half of the floor. Jump to return it.',false,2],
+  ['hoard','Ball Boroughs','Push balls into your team territory and keep them there.',false,3],
+  ['hoops','Ring Rally','Jump through the rings. Gold rings are worth three points.',false,0],
+  ['infection','Tag Contagion','Infected beans tag with E. Keep your team free of infection.',false,2],
+  ['push','Boulder Buddies','Push your team boulder to the far line.',false,3],
+  ['collect','Bubble Dash','Collect the floating stars. Keep moving as they respawn.',false,0],
+  ['possession','Beacon Keepers','Hold the beacon to score. E picks up, steals or throws.',false,0],
+  ['zone','Spotlight Shuffle','Stay inside the moving spotlight to score.',false,0],
+  ['buttons','Button Bounce','Touch the glowing button before somebody else does.',false,0],
+  ['territory','Battery Blocks','Carry a battery with E and paint the floor for your team.',false,2],
+  ['pattern','Pixel Picnic','Step on tiles to toggle them. Match the displayed 3×3 pattern.',false,2],
+  ['snowball','Snowball Social','Push your snowball over fresh snow patches to grow it.',false,2],
+  ['laps','Loop Lagoon','Pass the four gates in order. Complete three laps.',false,0],
+  ['lasers','Laser Limbo','Watch the warning, then jump the active beam.',true,0],
+  ['charge','Beetle Blitz','The beetles signal before charging. Dodge their path.',true,0],
+  ['reactive','Tidal Trouble','Leave marked tiles before the strike lands.',true,0],
+  ['blast','Blast Basin','E picks up or throws a fuse ball. Stay out of the blast.',true,0],
+].map(([id,name,instructions,elimination,teams])=>[id,{id,name,instructions,elimination,teams,duration:75,version:1,scoreType:elimination?'survival':id==='laps'?'laps':teams?'team-points':'points'}])));
+export const SYMBOLS = ['★','●','◆','▲'];
+export const TEAM_COLORS = ['#5cbef6','#ff799d','#ffc94c','#91df8c'];

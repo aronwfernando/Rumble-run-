@@ -4,14 +4,14 @@ import { validateMap } from './map-validation.js';
 export { COURSES, SURVIVAL_TYPES, FINAL_TYPES, validateMap };
 
 export const THEMES = [
-  { name: 'Cloud candy', sky: '#a4dcf5', floor: '#65d9dc', edge: '#159daf', accent: '#ff6798', secondary: '#ffc94c', fog: '#c6e9f6' },
-  { name: 'Peach punch', sky: '#b1bbf7', floor: '#ffb17e', edge: '#e37274', accent: '#8666e8', secondary: '#83f0cf', fog: '#d6d2fa' },
-  { name: 'Lime time', sky: '#b1e5dc', floor: '#b5e575', edge: '#5cae94', accent: '#fa72a1', secondary: '#ffd878', fog: '#d2eee4' },
-  { name: 'Electric jelly', sky: '#bab4ef', floor: '#9581e5', edge: '#6755b2', accent: '#ffca57', secondary: '#7ee1e5', fog: '#d7d2f7' },
-  { name: 'Watermelon', sky: '#a3dce8', floor: '#fd829e', edge: '#d9467a', accent: '#45c59b', secondary: '#ffe29a', fog: '#c6e8ef' },
-  { name: 'Blue raspberry', sky: '#bac9fb', floor: '#63b7f5', edge: '#3978d0', accent: '#ff9acb', secondary: '#ffdf69', fog: '#d0defa' },
-  { name: 'Tangerine dream', sky: '#f9d0a4', floor: '#ffad59', edge: '#db7742', accent: '#57d1ce', secondary: '#de9cf5', fog: '#f9e0c4' },
-  { name: 'Neon night', sky: '#343364', floor: '#9a73ff', edge: '#5f39b8', accent: '#fa5eac', secondary: '#5eefd0', fog: '#55527e' },
+  { id: 'candy-carnival', name: 'Candy Carnival', sky: '#a4dcf5', floor: '#65d9dc', edge: '#159daf', accent: '#ff6798', secondary: '#ffc94c', fog: '#c6e9f6' },
+  { id: 'toy-workshop', name: 'Toy Workshop', sky: '#b1bbf7', floor: '#ffb17e', edge: '#e37274', accent: '#8666e8', secondary: '#83f0cf', fog: '#d6d2fa' },
+  { id: 'jungle-canopy', name: 'Jungle Canopy', sky: '#b1e5dc', floor: '#b5e575', edge: '#5cae94', accent: '#fa72a1', secondary: '#ffd878', fog: '#d2eee4' },
+  { id: 'orbital-station', name: 'Orbital Station', sky: '#bab4ef', floor: '#9581e5', edge: '#6755b2', accent: '#ffca57', secondary: '#7ee1e5', fog: '#d7d2f7' },
+  { id: 'pirate-islands', name: 'Pirate Islands', sky: '#a3dce8', floor: '#fd829e', edge: '#d9467a', accent: '#45c59b', secondary: '#ffe29a', fog: '#c6e8ef' },
+  { id: 'frozen-docks', name: 'Frozen Docks', sky: '#bac9fb', floor: '#63b7f5', edge: '#3978d0', accent: '#ff9acb', secondary: '#ffdf69', fog: '#d0defa' },
+  { id: 'desert-ruins', name: 'Desert Ruins', sky: '#f9d0a4', floor: '#ffad59', edge: '#db7742', accent: '#57d1ce', secondary: '#de9cf5', fog: '#f9e0c4' },
+  { id: 'neon-factory', name: 'Neon Factory', sky: '#343364', floor: '#9a73ff', edge: '#5f39b8', accent: '#fa5eac', secondary: '#5eefd0', fog: '#55527e' },
 ];
 
 export const SECTION_TYPES = ['runway', 'bridge', 'split', 'stones', 'seesaw', 'ice', 'conveyor', 'turntables', 'false-floor'];
@@ -25,7 +25,7 @@ function platform(id, x, top, z, width, length, color, extra = {}) {
  * A shuffled recipe deck prevents repeated race families within a tournament.
  * Geometry, palette, obstacle placement and timing all derive from the seed.
  */
-export function generateMap({ seed = 'rumble', round = 0, type = 'race', difficulty = 0.4, variant, course, raceIndex = Math.floor(round / 2) } = {}) {
+export function generateMap({ seed = 'rumble', round = 0, type = 'race', difficulty = 0.4, variant, course, raceIndex = Math.floor(round / 2), sequence = null, themeId = null } = {}) {
   if (!['race', 'survival', 'final'].includes(type)) throw new Error('Unknown map type');
   if (!Number.isInteger(round) || round < 0 || round > 63) throw new Error('Invalid round');
   difficulty = Math.max(0, Math.min(1, Number(difficulty) || 0));
@@ -35,7 +35,7 @@ export function generateMap({ seed = 'rumble', round = 0, type = 'race', difficu
   if (finale && !FINAL_TYPES.includes(finale)) throw new Error('Unknown final variant');
   const mode = type === 'survival' || (finale && finale !== 'crown-climb') ? 'survival' : 'race';
   const palette = (random(seed).int(0, THEMES.length - 1) + round * 3) % THEMES.length;
-  const theme = { ...THEMES[palette] };
+  const theme = { ...THEMES.find(t => t.id === themeId) || THEMES[palette] };
   const map = { version: 2, seed, round, type, mode, finale, difficulty, theme, platforms: [], hazards: [], checkpoints: [], sections: [], spawn: [], finish: null };
   let serial = 0;
   const hazard = data => map.hazards.push({ id: 'h' + serial++, phase: rng.range(0, Math.PI * 2), ...data });
@@ -119,7 +119,7 @@ export function generateMap({ seed = 'rumble', round = 0, type = 'race', difficu
     map.checkpoints.push({ x: 0, y: 1.1, z: 1, width: 20, index: 0 });
     for (let i = 0; i < 30; i++) map.spawn.push([(i % 6 - 2.5) * 2.25, 1.1, 2 + Math.floor(i / 6) * 1.45]);
     let end = 10, height = 0, centerX = 0;
-    const segments = type === 'final' ? 8 : 7 + rng.int(0, 2);
+    const segments = sequence?.length || (type === 'final' ? 8 : 7 + rng.int(0, 2));
     const order = shuffle(recipe.sections, rng), obstacleOrder = shuffle(recipe.obstacles, rng);
     const opener = {
       'pinwheel-park': ['turntables', 'spinner'], 'gate-garden': ['runway', 'timed-gate'],
@@ -133,14 +133,15 @@ export function generateMap({ seed = 'rumble', round = 0, type = 'race', difficu
     for (let i = 0; i < segments; i++) {
       // Keep a clear central mechanic, with two guest sections. Remixing a
       // compatible module preserves safe landings better than scattering props.
-      const guestSection = guestSlots.has(i);
+      const guestSection = !sequence && guestSlots.has(i);
       let kind = guestSection ? rng.pick(guest.sections) : order[i % order.length];
       if (i === 0) kind = opener[0];
       if (i && kind === map.sections[i - 1].kind) kind = rng.pick(['runway', 'stones', 'split'].filter(k => k !== kind));
+      if (sequence) kind = sequence[i].kind;
       const challenge = Math.min(1, difficulty * 0.7 + i / segments * 0.3);
       const gap = i > 0 && i % 3 === 0 ? rng.range(0.9, 1.3 + challenge * 0.3) : 0;
-      const length = rng.range(21, 28), width = rng.range(16, 19);
-      const rise = kind === 'turntables' ? 0 : type === 'final' ? rng.range(1.7, 2.6) : recipe.climb ? rng.range(1.2, 2.2) : i % 2 ? rng.range(0.7, 1.4) : 0;
+      const length = sequence?.[i].length || rng.range(21, 28), width = sequence?.[i].width || rng.range(16, 19);
+      const rise = sequence?.[i].rise ?? (kind === 'turntables' ? 0 : type === 'final' ? rng.range(1.7, 2.6) : recipe.climb ? rng.range(1.2, 2.2) : i % 2 ? rng.range(0.7, 1.4) : 0);
       const shift = map.variant === 'zigzag' ? (i % 2 ? -5 : 5) : map.variant === 'switchback' ? (i < segments / 2 ? 4.5 : -4.5) : map.variant === 'straight' ? 0 : rng.range(-5, 5);
       centerX = Math.max(-16, Math.min(16, centerX + shift));
       const start = end + gap, center = start + length / 2;
@@ -196,6 +197,7 @@ export function generateMap({ seed = 'rumble', round = 0, type = 'race', difficu
       if (kind === 'false-floor') {
         obstacle = 'bumper'; pos = [centerX, height + rise * (length - 2) / length, -(start + length - 2)];
       }
+      if (sequence) obstacle = sequence[i].obstacle;
       const speed = (rng.range(0.65, 0.9) + challenge * 0.45) * (i === 0 ? 0.85 : 1);
       if (obstacle === 'spinner') hazard({ kind: obstacle, position: [pos[0], pos[1] + 0.65, pos[2]], size: [obstacleWidth - 1.2, 0.5, 0.65], speed: speed * rng.pick([-1, 1]), color: theme.accent });
       if (obstacle === 'pendulum') for (let j = 0; j < 2; j++) hazard({ kind: obstacle, position: [pos[0], pos[1] + 1.2, pos[2] + (j ? -3.5 : 3.5)], radius: 1.2, amplitude: width / 2 - 2, speed: speed * (j ? -1 : 1), color: theme.accent });
@@ -205,7 +207,7 @@ export function generateMap({ seed = 'rumble', round = 0, type = 'race', difficu
       if (obstacle === 'piston') for (let j = -1; j <= 1; j++) hazard({ kind: obstacle, position: [pos[0] + j * 4.5, pos[1] + 1.05, pos[2]], size: [3.8, 2.1, 2.8], amplitude: 3.5, speed: speed * 1.5, color: theme.accent });
       if (['roller', 'cannonball', 'fruit', 'log'].includes(obstacle)) {
         const lanes = obstacle === 'log' ? [-1, 1] : [-1, 0, 1];
-        for (const j of lanes) hazard({ kind: obstacle, position: [pos[0] + j * (obstacle === 'log' ? 4.5 : 2.5), pos[1] + 1.05, pos[2]], radius: obstacle === 'log' ? 1 : obstacle === 'fruit' ? 1.25 : 1, amplitude: length / 2 - 2, slope: rise / length, speed: speed * 0.85, color: theme.accent });
+        for (const j of lanes) hazard({ kind: obstacle, position: [pos[0] + j * (obstacle === 'log' ? 4.5 : 2.5), pos[1] + 1.05, pos[2]], radius: obstacle === 'log' ? 1 : obstacle === 'fruit' ? 1.25 : 1, amplitude: Math.max(1, length / 2 - 6), slope: rise / length, speed: speed * 0.85, color: theme.accent });
       }
       if (obstacle === 'windmill') hazard({ kind: obstacle, position: [pos[0], pos[1] + 2.1, pos[2]], size: [8, 0.7, 0.8], speed: speed * 1.3, color: theme.accent });
       if (obstacle === 'doors' || obstacle === 'timed-gate') {

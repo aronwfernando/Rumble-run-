@@ -9,6 +9,7 @@ function footprint(p) {
   return { x: p.position[0], z: p.position[2], radius, hx, hz };
 }
 export function platformTop(p, x, z) {
+  if(p.drum)return p.position[1]+Math.sqrt(Math.max(0,p.drum.radius**2-(z-p.position[2])**2))+0.4;
   return p.position[1] + p.size[1] / (2 * Math.cos(p.rotation[0])) - (z - p.position[2]) * Math.tan(p.rotation[0]);
 }
 export function platformContains(p, x, z, margin = 0) {

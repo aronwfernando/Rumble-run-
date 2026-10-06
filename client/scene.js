@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { generateMap, hazardTransform, crownHeight } from '../shared/maps.js';
+import { ArenaView } from './arena-view.js';
+import { SceneBatches } from './batching.js';
+import { addScenery } from './scenery.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
 export class GameScene {
@@ -19,11 +22,14 @@ export class GameScene {
       capsule: new THREE.CapsuleGeometry(0.44, 0.7, 4, 8), limb: new THREE.CapsuleGeometry(0.13, 0.35, 2, 6),
       face: new THREE.SphereGeometry(1, 12, 8), cylinder: new THREE.CylinderGeometry(1, 1, 1, 12),
       shadow: new THREE.CircleGeometry(0.65, 16), cone: new THREE.ConeGeometry(1, 1, 5),
+      torus: new THREE.TorusGeometry(1,0.07,4,20),
     };
     this.vertexMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
     this.warningMaterial = new THREE.MeshLambertMaterial({ color: '#ff4c6f', flatShading: true });
     this.shadowMaterial = new THREE.MeshBasicMaterial({ color: '#263558', transparent: true, opacity: 0.16, depthWrite: false });
     this.world = new THREE.Group(); this.scene.add(this.world);
+    this.batches=new SceneBatches(this.scene,this.world);this.batchDirty=true;
+    this.cameraRay=new THREE.Raycaster();this.cameraRay.layers.enable(1);this.cameraRayDirection=new THREE.Vector3();
     this.target = new THREE.Vector3(); this.desiredCamera = new THREE.Vector3(); this.lookTarget = new THREE.Vector3(); this.lookDesired = new THREE.Vector3();
     this.forward = new THREE.Vector3(0, 0, -1); this.cameraOffset = new THREE.Vector3(); this.cameraShakeOffset = new THREE.Vector3();
     this.projectVector = new THREE.Vector3(); this.menu = true; this.quality = 'balanced'; this.smoothInitialized = false;
@@ -44,7 +50,7 @@ export class GameScene {
     const m = new THREE.Mesh(this.geometries[geometry], this.material(color));
     if (position) m.position.set(...position);
     if (scale) m.scale.set(...scale);
-    parent.add(m); return m;
+    parent.add(m);this.batchDirty=true; return m;
   }
   box(size, top, side, footprint = null) {
     const g = footprint?.radius ? new THREE.CylinderGeometry(footprint.radius, footprint.radius, size[1], footprint.sides || 12) : new THREE.BoxGeometry(...size);
@@ -54,19 +60,28 @@ export class GameScene {
     const m = new THREE.Mesh(g, this.vertexMaterial); m.userData.ownedGeometry = true; return m;
   }
   clearMap() {
+    this.batches.clear();this.batchDirty=true;
     this.world.traverse(o => { if (o.userData.ownedGeometry) o.geometry.dispose(); if (o.userData.ownedMaterial) { o.material.map?.dispose(); o.material.dispose(); } });
     this.world.clear();
     for (const avatar of this.avatars.values()) avatar.label.remove();
     this.avatars.clear(); this.showcase = null;
   }
   loadMap(map) {
-    this.clearMap(); this.map = map; this.platformMeshes = new Map(); this.hazardMeshes = new Map(); this.crown = null;
+    this.clearMap(); this.map = map; this.platformMeshes = new Map(); this.hazardMeshes = new Map(); this.crown = null;this.arena=null;
     const theme = map.theme;
     this.scene.background = new THREE.Color(theme.sky);
     this.scene.fog = new THREE.Fog(theme.fog, 80, 220);
     for (const p of map.platforms) {
       const ice = p.surface === 'ice';
-      const mesh = this.box(p.size, ice ? '#d7f5ff' : p.color, theme.edge, p);
+      const mesh = p.drum||p.id==='net'?new THREE.Group():this.box(p.size, ice ? '#d7f5ff' : p.color, theme.edge, p);
+      if(p.drum)for(let i=0;i<20;i++){
+        if(i===p.drum.gap||i===p.drum.gap+1)continue;
+        const a=i*Math.PI/10,slat=this.mesh('box',i%2?p.color:theme.secondary,[0,Math.cos(a)*p.drum.radius,Math.sin(a)*p.drum.radius],[p.drum.span,0.8,1.28],mesh);slat.rotation.x=a;
+      }
+      if(p.id==='net'){
+        for(let z=-18;z<=18;z+=3)this.mesh('box','#ffffff',[0,0,z],[0.1,2.1,0.08],mesh);
+        for(const y of [-1,0,1])this.mesh('box','#ffffff',[0,y,0],[0.1,0.08,37],mesh);
+      }
       mesh.position.set(...p.position); mesh.rotation.set(...p.rotation); this.world.add(mesh);
       this.platformMeshes.set(p.id, mesh);
       if (p.turntable) {
@@ -169,24 +184,12 @@ export class GameScene {
       }
       this.world.add(marker); this.checkpointMarkers.push(marker);
     }
-    const under = this.mesh('box', map.slime ? '#ff72bb' : '#77cdda', [0, -17, -map.length / 2], [700, 1, 650]);
+    const under = this.mesh('box', map.slime ? '#ff72bb' : '#77cdda', [0, (map.killY??-15)-2, -map.length / 2], [700, 1, 650]);
     this.slimeMesh = map.slime ? under : null;
-    // Cheap distant scenery: low-poly clouds and floating islands, no texture fetches.
-    for (let i = 0; i < 15; i++) {
-      const x = (i % 2 ? -1 : 1) * (24 + i % 4 * 9), z = -i * 18 + 15;
-      const island = this.mesh('cone', theme.edge, [x, -5 - i % 3, z], [4 + i % 3, 6, 4 + i % 3]); island.rotation.z = Math.PI;
-      this.mesh('cylinder', theme.floor, [x, -2 - i % 3, z], [4 + i % 3, 0.6, 4 + i % 3]);
-      if (map.decor === 'crystals') {
-        for (let j = 0; j < 3; j++) this.mesh('cone', j % 2 ? theme.secondary : theme.accent, [x + j * 1.8, 1 + j, z - 3], [1.1, 6 + j * 2, 1.1]);
-      } else if (map.decor === 'towers') {
-        this.mesh('box', theme.secondary, [x, 3, z], [4, 9 + i % 3 * 3, 4]);
-        this.mesh('box', theme.accent, [x, 8 + i % 3 * 1.5, z], [5, 1, 5]);
-      } else if (map.decor === 'balloons' && i % 2 === 0) {
-        this.mesh('sphere', i % 4 ? theme.accent : theme.secondary, [x, 12, z], [3.2, 3.8, 3.2]);
-        this.mesh('cylinder', '#ffffff', [x, 6, z], [0.045, 7, 0.045]);
-      } else if (i % 2 === 0) for (let j = 0; j < 3; j++) this.mesh('sphere', '#eaf5ff', [x + j * 2, 8 + i % 3 * 3, z - 16], [3.2, 1.7, 2.1]);
-    }
+    addScenery(this,map);
+    if(map.mode==='arena')this.arena=new ArenaView(this,map);
     this.smoothInitialized = false;
+    this.batchDirty=true;
   }
   addArch(x, y, z, width, text, theme) {
     for (const side of [-1, 1]) {
@@ -245,6 +248,7 @@ export class GameScene {
     const a = { root, label, player, data: null, stride: 0, squash: 0, lastGrounded: false, groundY: null, teleport: null };
     this.avatars.set(player.id, a); return a;
   }
+  removeAvatar(id){const a=this.avatars.get(id);if(!a)return;a.root.removeFromParent();a.label.remove();this.avatars.delete(id);this.batchDirty=true;}
   updateAvatar(id, state, time, delta) {
     const a = this.avatars.get(id); if (!a) return;
     a.data = state;
@@ -292,7 +296,8 @@ export class GameScene {
       mesh.position.y = p.position[1] - (dropping ? Math.pow((time - dropAt) * 9, 2) : 0);
       mesh.rotation.z = state?.a ?? p.rotation[2];
       mesh.rotation.y = p.turntable ? time * p.turntable : p.rotation[1];
-      mesh.material = dropAt != null && dropAt - time > 0 && dropAt - time < 2 && Math.floor(time * 8) % 2 ? this.warningMaterial : this.vertexMaterial;
+      if(p.drum)mesh.rotation.x=time*p.drum.speed;
+      if(mesh.isMesh)mesh.material = dropAt != null && dropAt - time > 0 && dropAt - time < 2 && Math.floor(time * 8) % 2 ? this.warningMaterial : this.vertexMaterial;
       if (dropAt != null && dropAt - time > 0 && dropAt - time < 2) mesh.position.y += Math.sin(time * 45) * 0.04;
     }
     const broken = new Set(env?.broken || []);
@@ -307,10 +312,11 @@ export class GameScene {
       }
     }
     if (this.crown) { this.crown.position.y = crownHeight(this.map, time); this.crown.rotation.y = time * 0.8; }
-    if (this.slimeMesh) this.slimeMesh.position.y = this.map.slime.start + time * this.map.slime.speed - 0.5;
+    if (this.slimeMesh) this.slimeMesh.position.y = this.map.slime.start + Math.max(0, time - (this.map.slime.delay || 0)) * this.map.slime.speed - 0.5;
   }
-  render(delta, time, follow, followState, menuTime, env) {
+  render(delta, time, follow, followState, menuTime, env, objective) {
     this.environment(time, env);
+    this.arena?.update(objective,time,delta);
     if (this.menu) {
       const mobile = innerWidth < 760;
       this.camera.position.set(mobile ? 17 : 27, mobile ? 14 : 19, mobile ? 24 : 28);
@@ -326,16 +332,25 @@ export class GameScene {
       this.lookDesired.y += 0.5;
       this.lookDesired.x += (followState?.v?.[0] || 0) * 0.065;
       this.lookDesired.z += (followState?.v?.[2] || 0) * 0.065;
+      this.world.updateMatrixWorld(true);
+      this.cameraRayDirection.copy(this.desiredCamera).sub(this.lookDesired);
+      this.cameraRay.far=this.cameraRayDirection.length();this.cameraRay.near=0.15;
+      this.cameraRay.set(this.lookDesired,this.cameraRayDirection.normalize());
+      const solids=[...this.platformMeshes.values(),...this.hazardMeshes.values()].filter(m=>m.visible);
+      const hit=this.cameraRay.intersectObjects(solids,true)[0];
+      if(hit)this.desiredCamera.copy(this.lookDesired).addScaledVector(this.cameraRayDirection,Math.max(0.5,hit.distance-0.45));
       if (!this.smoothInitialized || this.camera.position.distanceTo(this.desiredCamera) > 35) {
         this.camera.position.copy(this.desiredCamera); this.lookTarget.copy(this.lookDesired); this.smoothInitialized = true;
       } else {
-        this.camera.position.lerp(this.desiredCamera, 1 - Math.exp(-delta * 10));
+        this.camera.position.lerp(this.desiredCamera,hit?1:1 - Math.exp(-delta * 10));
         this.lookTarget.lerp(this.lookDesired, 1 - Math.exp(-delta * 14));
       }
       this.camera.lookAt(this.lookTarget);
       const fov = this.cameraFov + (this.reducedMotion ? 0 : Math.min(3, speed * 0.17));
       if (Math.abs(this.camera.fov - fov) > 0.01) { this.camera.fov += (fov - this.camera.fov) * (1 - Math.exp(-delta * 5)); this.camera.updateProjectionMatrix(); }
     }
+    if(this.batchDirty){this.batches.rebuild();this.batchDirty=false;}
+    this.batches.update();
     this.renderer.render(this.scene, this.camera);
   }
   resize() { this.camera.aspect = innerWidth / innerHeight; this.camera.updateProjectionMatrix(); this.renderer.setSize(innerWidth, innerHeight, false); }

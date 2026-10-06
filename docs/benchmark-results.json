@@ -1,0 +1,129 @@
+{
+  "date": "2026-10-06T18:20:00.643Z",
+  "runtime": "v24.19.0",
+  "platform": "linux",
+  "hardwareScope": "Local execution container, single room, simulated human inputs. Not a Render capacity or client FPS measurement.",
+  "wireScope": "Socket.IO event encoding plus estimated WebSocket framing, excludes TLS/TCP, initial map download and retransmissions.",
+  "results": [
+    {
+      "players": 16,
+      "mode": "generated-race",
+      "steps": 600,
+      "meanMs": 0.49,
+      "p95Ms": 1.447,
+      "maxMs": 13.097,
+      "frameBytesMean": 1383,
+      "downstreamBytesPerSecond": 20745
+    },
+    {
+      "players": 16,
+      "mode": "collection",
+      "steps": 600,
+      "meanMs": 0.523,
+      "p95Ms": 1.068,
+      "maxMs": 4.416,
+      "frameBytesMean": 2001,
+      "downstreamBytesPerSecond": 30018
+    },
+    {
+      "players": 16,
+      "mode": "rolling",
+      "steps": 207,
+      "meanMs": 0.306,
+      "p95Ms": 1.188,
+      "maxMs": 5.039,
+      "frameBytesMean": 1504,
+      "downstreamBytesPerSecond": 22673
+    },
+    {
+      "players": 16,
+      "mode": "football",
+      "steps": 600,
+      "meanMs": 0.265,
+      "p95Ms": 0.384,
+      "maxMs": 0.73,
+      "frameBytesMean": 1557,
+      "downstreamBytesPerSecond": 23353
+    },
+    {
+      "players": 24,
+      "mode": "generated-race",
+      "steps": 600,
+      "meanMs": 0.369,
+      "p95Ms": 0.755,
+      "maxMs": 4.542,
+      "frameBytesMean": 1895,
+      "downstreamBytesPerSecond": 28421
+    },
+    {
+      "players": 24,
+      "mode": "collection",
+      "steps": 600,
+      "meanMs": 0.558,
+      "p95Ms": 0.799,
+      "maxMs": 3.731,
+      "frameBytesMean": 2513,
+      "downstreamBytesPerSecond": 37702
+    },
+    {
+      "players": 24,
+      "mode": "rolling",
+      "steps": 207,
+      "meanMs": 0.333,
+      "p95Ms": 1.149,
+      "maxMs": 1.996,
+      "frameBytesMean": 2016,
+      "downstreamBytesPerSecond": 30391
+    },
+    {
+      "players": 24,
+      "mode": "football",
+      "steps": 600,
+      "meanMs": 0.393,
+      "p95Ms": 0.606,
+      "maxMs": 0.862,
+      "frameBytesMean": 2069,
+      "downstreamBytesPerSecond": 31032
+    },
+    {
+      "players": 30,
+      "mode": "generated-race",
+      "steps": 600,
+      "meanMs": 0.346,
+      "p95Ms": 0.51,
+      "maxMs": 1.455,
+      "frameBytesMean": 2279,
+      "downstreamBytesPerSecond": 34185
+    },
+    {
+      "players": 30,
+      "mode": "collection",
+      "steps": 600,
+      "meanMs": 0.621,
+      "p95Ms": 0.836,
+      "maxMs": 2.326,
+      "frameBytesMean": 2897,
+      "downstreamBytesPerSecond": 43461
+    },
+    {
+      "players": 30,
+      "mode": "rolling",
+      "steps": 207,
+      "meanMs": 0.413,
+      "p95Ms": 1.355,
+      "maxMs": 2.156,
+      "frameBytesMean": 2400,
+      "downstreamBytesPerSecond": 36179
+    },
+    {
+      "players": 30,
+      "mode": "football",
+      "steps": 600,
+      "meanMs": 0.535,
+      "p95Ms": 0.839,
+      "maxMs": 3.839,
+      "frameBytesMean": 2453,
+      "downstreamBytesPerSecond": 36794
+    }
+  ]
+}

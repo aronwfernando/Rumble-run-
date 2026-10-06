@@ -10,6 +10,7 @@ import { Server } from 'socket.io';
 import { Tournament } from './server/tournament.js';
 import { Bucket, cleanName, cleanColor, cleanInput, cleanSettings } from './server/validation.js';
 import { DT, TICK_RATE, SNAPSHOT_RATE, VERSION } from './shared/config.js';
+import { PROTOCOL_VERSION, encodeFrame } from './shared/protocol.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const numberEnv = (name, fallback, min, max) => Math.max(min, Math.min(max, Number(process.env[name]) || fallback));
@@ -21,6 +22,7 @@ export async function createGameServer({ dev = false, maxRooms = numberEnv('MAX_
   app.use(helmet({ contentSecurityPolicy: dev ? false : { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:'], connectSrc: ["'self'"], fontSrc: ["'self'"], objectSrc: ["'none'"], upgradeInsecureRequests: null } }, crossOriginEmbedderPolicy: false }));
   app.use(compression());
   const rooms = new Map(), sessions = new Map();
+  const frameHistory = new Map();
   let shuttingDown = false, lastTickMs = 0, droppedTime = 0;
   app.get('/healthz', (_req, res) => res.status(shuttingDown ? 503 : 200).json({ ok: !shuttingDown, version: VERSION, rooms: rooms.size, connections: io.engine.clientsCount, simulationMs: +lastTickMs.toFixed(2), droppedTimeMs: Math.round(droppedTime * 1000) }));
   const io = new Server(http, {
@@ -35,6 +37,8 @@ export async function createGameServer({ dev = false, maxRooms = numberEnv('MAX_
     },
   });
   let vite;
+  io.use((socket, next) => socket.handshake.auth?.protocol === PROTOCOL_VERSION
+    ? next() : next(new Error('Game updated. Reload to use the current version.')));
   if (dev) {
     const { createServer: createViteServer } = await import('vite');
     vite = await createViteServer({ root, server: { middlewareMode: true, hmr: { server: http } }, appType: 'spa' });
@@ -73,6 +77,7 @@ export async function createGameServer({ dev = false, maxRooms = numberEnv('MAX_
     room.setConnected(session.id, true);
     const player = room.players.get(session.id);
     socket.emit('welcome', { id: session.id, token, controls: { seq: player.lastSeq, jump: player.jumps, dive: player.dives, grab: player.grabs }, state: room.state() });
+    socket.emit('frame', encodeFrame(room.snapshot(), null, true));
     return true;
   }
   io.on('connection', socket => {
@@ -91,7 +96,7 @@ export async function createGameServer({ dev = false, maxRooms = numberEnv('MAX_
         if (!payload || typeof payload !== 'object') throw new Error('Invalid room request.');
         let room;
         if (payload.mode === 'create') room = newRoom(true, cleanSettings(payload));
-        else if (payload.mode === 'quick') room = [...rooms.values()].find(r => !r.privateRoom && r.phase === 'lobby' && r.players.size < 30) || newRoom(false, cleanSettings({}));
+        else if (payload.mode === 'quick') room = [...rooms.values()].find(r => !r.privateRoom && r.phase === 'lobby' && r.players.size < r.settings.capacity) || newRoom(false, cleanSettings({}));
         else if (payload.mode === 'join') {
           if (typeof payload.code !== 'string' || !/^[A-F0-9]{6}$/i.test(payload.code)) throw new Error('Enter a six-character room code.');
           room = rooms.get(payload.code.toUpperCase());
@@ -124,6 +129,27 @@ export async function createGameServer({ dev = false, maxRooms = numberEnv('MAX_
       if (typeof ack !== 'function' || !miscBucket.take()) return;
       try { const room = rooms.get(socket.data.code); if (!room) throw new Error('Join a room first.'); room.rematch(socket.data.playerId); ack({ ok: true }); } catch (e) { ack({ error: e.message }); }
     });
+    for(const [event,method] of [['room-settings','editSettings'],['ready','setReady'],['transfer-host','transferHost']])socket.on(event,(payload,ack)=>{
+      if(typeof ack!=='function')return;
+      if(!miscBucket.take())return ack({error:'Please wait a moment before changing the room again.'});
+      try{
+        const room=rooms.get(socket.data.code);if(!room)throw new Error('Join a room first.');
+        if(event==='room-settings'&&(!payload||typeof payload!=='object'||Array.isArray(payload)))throw new Error('Invalid room settings.');
+        if(event==='ready'&&typeof payload!=='boolean')throw new Error('Invalid ready state.');
+        if(event==='transfer-host'&&typeof payload!=='string')throw new Error('Invalid player.');
+        room[method](socket.data.playerId,payload);ack({ok:true});
+      }catch(e){ack({error:e.message});}
+    });
+    socket.on('kick',(id,ack)=>{
+      if(typeof ack!=='function'||!miscBucket.take())return;
+      try{
+        const room=rooms.get(socket.data.code);
+        if(!room?.privateRoom||room.phase!=='lobby'||room.hostId!==socket.data.playerId||id===socket.data.playerId||!room.players.has(id))throw new Error('Only the host can remove another player from a waiting private room.');
+        const entry=[...sessions.entries()].find(([,s])=>s.code===room.code&&s.id===id);
+        if(entry){const [token,session]=entry,target=io.sockets.sockets.get(session.socketId);target?.emit('removed-from-room');target?.leave(room.code);if(target){target.data.token=null;target.data.code=null;target.data.playerId=null;}dropSession(token);}
+        ack({ok:true});
+      }catch(e){ack({error:e.message});}
+    });
     socket.on('ping-check', ack => { if (typeof ack === 'function' && miscBucket.take()) ack(); });
     socket.on('leave', ack => {
       if (!miscBucket.take()) return;
@@ -148,10 +174,21 @@ export async function createGameServer({ dev = false, maxRooms = numberEnv('MAX_
     while (accumulator >= DT && substeps < 5) {
       for (const room of rooms.values()) room.step();
       accumulator -= DT; substeps++; step++;
-      if (step % (TICK_RATE / SNAPSHOT_RATE) === 0) for (const room of rooms.values()) io.to(room.code).volatile.emit('snapshot', room.snapshot());
+      if (step % (TICK_RATE / SNAPSHOT_RATE) === 0) for (const room of rooms.values()) {
+        const snapshot = room.snapshot(), last = frameHistory.get(room.code);
+        const keyframe = !last || last.roundKey !== room.roundKey || step % (TICK_RATE * 2) === 0;
+        // Environmental changes are reliable: dropping a volatile delta could
+        // leave a tile visually present until the next keyframe.
+        const frame = encodeFrame(snapshot, last?.environment, keyframe);
+        const changed = frame.environment?.broken.length || frame.environment?.platforms.length;
+        if (keyframe || changed) io.to(room.code).emit('frame', frame);
+        else io.to(room.code).volatile.emit('frame', frame);
+        frameHistory.set(room.code, { roundKey: room.roundKey, environment: snapshot.environment });
+      }
     }
     if (substeps === 5 && accumulator >= DT) { droppedTime += accumulator; accumulator = 0; }
     lastTickMs = performance.now() - began;
+    for (const code of frameHistory.keys()) if (!rooms.has(code)) frameHistory.delete(code);
     for (const [key, s] of sessions) if (s.expires <= now) dropSession(key);
     for (const socket of io.sockets.sockets.values()) if (!socket.data.token && socket.data.idleUntil < now) socket.disconnect(true);
   }, 1000 / TICK_RATE);

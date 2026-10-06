@@ -33,6 +33,19 @@ test('server round progression changes map and keeps humans only', () => {
   assert.ok(['countdown', 'playing', 'results', 'finished'].includes(room.phase));
 });
 
+test('twenty tournaments reset round state without accumulating room listeners or players',()=>{
+  const room=new Tournament('SOAK00',{rounds:4,seed:'soak',timings:{countdown:0,intermission:0,raceSeconds:.05,survivalSeconds:.05,finalSeconds:.05}});
+  const host=room.addHuman({name:'Host'});room.addHuman({name:'Friend'});let states=0;room.on('state',()=>states++);
+  const keys=new Set();
+  for(let match=0;match<20;match++){
+    room.start(host.id);keys.add(room.roundKey);
+    for(let tick=0;tick<200&&room.phase!=='finished';tick++)room.step();
+    assert.equal(room.phase,'finished');assert.equal(room.players.size,2);assert.equal(room.listenerCount('state'),1);
+    room.rematch(host.id);assert.equal(room.physics,null);assert.equal(room.objective,null);assert.equal(room.results.length,0);
+  }
+  assert.equal(keys.size,20);assert.ok(states>=100);
+});
+
 test('eight-round match transitions match the lobby course preview', () => {
   const room = new Tournament('EIGHT0', { rounds: 8, seed: 'full-match', timings: { countdown: 0, intermission: 0, raceSeconds: 0.05, survivalSeconds: 0.05, finalSeconds: 0.05 } });
   const a = room.addHuman({ name: 'Host', color: '#ff658c' });

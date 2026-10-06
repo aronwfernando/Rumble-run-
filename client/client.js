@@ -2,26 +2,30 @@ import './style.css';
 import { io } from 'socket.io-client';
 import { COLORS, DT, RULES } from '../shared/config.js';
 import { PhysicsWorld } from '../shared/physics.js';
-import { generateMap } from '../shared/maps.js';
+import { generateMap, THEMES } from '../shared/maps.js';
+import { PRESETS } from '../shared/presets.js';
+import { OBJECTIVES, TEAM_COLORS, SYMBOLS } from '../shared/objectives.js';
 import { GameScene } from './scene.js';
 import { InputController } from './input.js';
 import { samplePlayers, renderLocal } from './netcode.js';
+import { PROTOCOL_VERSION, decodeFrame } from '../shared/protocol.js';
+import { verifyPublicMap } from '../shared/content.js';
 
 const $ = selector => document.querySelector(selector);
 const show = (selector, visible) => { $(selector).hidden = !visible; };
 const text = (selector, value) => { $(selector).textContent = value; };
-const storage = { get(key, fallback = '') { try { return sessionStorage.getItem(key) ?? fallback; } catch { return fallback; } }, set(key, value) { try { if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, value); } catch { /* Storage is optional. */ } } };
+const storage = { get(key, fallback = '') { try { return (key==='rumble-session'?sessionStorage:localStorage).getItem(key) ?? fallback; } catch { return fallback; } }, set(key, value) { try { const store=key==='rumble-session'?sessionStorage:localStorage;if (value === null) store.removeItem(key); else store.setItem(key, value); } catch { /* Storage is optional. */ } } };
 let toastTimer;
 function toast(message, sticky = false) { text('#toast', message); show('#toast', true); clearTimeout(toastTimer); if (!sticky) toastTimer = setTimeout(() => show('#toast', false), 4200); }
 let personalResultTimer, personalStatus = null;
 function hidePersonalResult() { clearTimeout(personalResultTimer); show('#personal-result', false); }
-function showPersonalResult(status) {
+function showPersonalResult(status, cause, placement) {
   if (!['qualified', 'eliminated'].includes(status) || personalStatus === status) return;
   personalStatus = status;
   const qualified = status === 'qualified';
   text('#personal-result-eyebrow', qualified ? 'ROUND UPDATE' : 'ROUND OVER');
   text('#personal-result-title', qualified ? 'QUALIFIED!' : 'YOU’RE OUT');
-  text('#personal-result-detail', qualified ? 'Nice run. You can watch the remaining beans before the next course.' : 'That run is over, but you can spectate the rest of the round and rejoin the next match.');
+  text('#personal-result-detail', qualified ? `${placement?'Finished #'+placement+'. ':''}You can watch the remaining beans before the next course.` : `${cause?cause+'. ':''}${state?.settings.format==='grandprix'?'Watch the remaining beans. You return next round.':'You can spectate the rest of the round and rejoin the next match.'}`);
   show('#personal-result', true);
   clearTimeout(personalResultTimer);
   personalResultTimer = setTimeout(hidePersonalResult, qualified ? 2600 : 5200);
@@ -32,7 +36,7 @@ let view;
 try { view = new GameScene($('#game')); } catch (error) { fatal('This browser could not start WebGL. Enable hardware acceleration or try a current Chrome, Firefox, Edge, or Safari browser.'); throw error; }
 document.addEventListener('render-lost', () => fatal('The graphics context was interrupted. Reload to reconnect to your match.'));
 const input = new InputController();
-const socket = io({ auth: callback => callback({ token: storage.get('rumble-session') }), reconnectionDelay: 500, reconnectionDelayMax: 2000, timeout: 10000 });
+const socket = io({ auth: callback => callback({ token: storage.get('rumble-session'), protocol: PROTOCOL_VERSION }), reconnectionDelay: 500, reconnectionDelayMax: 2000, timeout: 10000 });
 let myId = null, state = null, snapshot = null, physics = null, roundKey = null;
 let selectedColor = storage.get('rumble-color', COLORS[0]);
 if (!COLORS.includes(selectedColor)) selectedColor = COLORS[0];
@@ -72,19 +76,35 @@ $('#room-code').addEventListener('input', e => e.target.value = e.target.value.t
 $('#room-form').onsubmit = event => { event.preventDefault(); join('create'); };
 $('#join').onclick = () => join('join');
 $('#quick').onclick = () => join('quick');
+$('#practice').onclick = () => join('practice');
 $('#room-code').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); join('join'); } });
-$('#match-settings-toggle').onclick = () => show('#match-options', $('#match-options').hidden);
+const optionKeys=['rounds','seed','difficulty','playlist','content','theme','capacity','format'];
+for(const [selector,items]of [['#preset',PRESETS.filter(p=>p.type!=='objective').map(p=>({id:p.id,name:p.name})).concat(Object.values(OBJECTIVES).map(o=>({id:'arena:'+o.id,name:o.name})))],['#theme',THEMES]])for(const item of items){const o=document.createElement('option');o.value=item.id;o.textContent=item.name;$(selector).append(o);}
+function roomOptions(){const options=Object.fromEntries(optionKeys.map(key=>[key,['rounds','capacity'].includes(key)?Number($('#'+key).value):$('#'+key).value]));const focus=$('#preset').value;return {...options,preset:focus.startsWith('arena:')?'':focus,objective:focus.startsWith('arena:')?focus.slice(6):''};}
+function openMatchSettings(){
+  if(state){for(const key of optionKeys)$('#'+key).value=state.settings[key]??'';$('#preset').value=state.settings.objective?'arena:'+state.settings.objective:state.settings.preset;}
+  $('#match-settings').showModal();
+}
+$('#match-settings-toggle').onclick=openMatchSettings;$('#edit-room').onclick=openMatchSettings;
+$('#close-match-settings').onclick=()=>$('#match-settings').close();
+$('#save-match-settings').onclick=()=>{
+  if(!state){$('#match-settings').close();return;}
+  requestPayload('room-settings',roomOptions(),()=>{$('#match-settings').close();toast('Room options updated. Ready checks reset.');});
+};
+$('#format').onchange=()=>{if($('#format').value!=='grandprix'&&Number($('#rounds').value)>8)$('#rounds').value='8';for(const o of $('#rounds').options)o.disabled=Number(o.value)>8&&$('#format').value!=='grandprix';};
 function join(mode) {
   if (!socket.connected) return toast('Connecting to the server. Please try again in a moment.');
   if (!$('#nickname').reportValidity()) return;
   storage.set('rumble-name', $('#nickname').value);
   $('#room-form button[type=submit]').disabled = true;
-  socket.timeout(7000).emit('join', { mode, name: $('#nickname').value, color: selectedColor, code: $('#room-code').value.trim(), rounds: Number($('#rounds').value), seed: $('#seed').value.trim(), difficulty: $('#difficulty').value, playlist: $('#playlist').value }, (err, result) => {
+  socket.timeout(7000).emit('join', { mode:mode==='practice'?'create':mode, practice:mode==='practice', name: $('#nickname').value, color: selectedColor, code: $('#room-code').value.trim(), ...roomOptions() }, (err, result) => {
     $('#room-form button[type=submit]').disabled = false;
     if (err || result?.error) toast(result?.error || 'Could not join. Check your connection and try again.');
   });
 }
 function request(event) { socket.timeout(5000).emit(event, (err, result) => { if (err || result?.error) toast(result?.error || 'The server did not respond. Please try again.'); }); }
+function requestPayload(event,payload,done){socket.timeout(5000).emit(event,payload,(err,result)=>{if(err||result?.error)toast(result?.error||'The server did not respond. Please try again.');else done?.();});}
+$('#ready').onclick=()=>requestPayload('ready',!state?.players.find(p=>p.id===myId)?.ready);
 $('#start').onclick = () => request('start');
 $('#rematch').onclick = () => request('rematch');
 function resetCheckpoint() { if (state?.phase === 'playing' && state.map.mode === 'race') request('reset-checkpoint'); }
@@ -113,6 +133,8 @@ for (const [id, fallback, apply] of [
   ['camera-fov', '58', value => view.cameraFov = Number(value)],
   ['camera-distance', '11.5', value => view.cameraDistance = Number(value)],
   ['camera-sensitivity', '1', value => input.sensitivity = Number(value)],
+  ['invert-look','normal',value=>input.lookSign=value==='inverted'?-1:1],
+  ['air-jump-dive','jump',value=>input.airJumpDive=value==='dive'],
   ['motion', view.reducedMotion ? 'reduced' : 'on', value => view.reducedMotion = value === 'reduced'],
   ['names', 'on', value => view.showNames = value === 'on'],
   ['shadows', 'on', value => view.showShadows = value === 'on'],
@@ -127,17 +149,23 @@ $('#score-button').onclick = toggleScore; $('#close-score').onclick = () => show
 input.onToggleScore = toggleScore; input.onMenu = openSettings;
 input.onReset = resetCheckpoint;
 input.getYaw = () => view.cameraYaw;
-input.onLook = amount => { view.cameraYaw += amount; };
+input.onLook = amount => { view.cameraYaw += amount*(input.lookSign||1); };
+input.isAirborne=()=>{const p=physics?.players.get(myId);return !!p&&!p.grounded&&simulationTime-p.lastGround>RULES.coyoteTime;};
 input.onCenterCamera = () => { view.cameraYaw = 0; };
 input.onChange = () => { if (socket.connected && state?.phase === 'playing') socket.volatile.emit('input', input.packet(roundKey)); };
 input.onAction = action => { localActionAt = performance.now(); if (input.enabled && socket.connected) socket.volatile.emit('input', input.packet(roundKey)); if (action === 'jump') beep(380); if (action === 'dive') beep(180, 0.14, 'triangle'); };
-$('#next-player').onclick = () => { const ids = snapshot?.players.filter(p => p.p && p.status === 'racing').map(p => p.id) || []; watching = ids[(ids.indexOf(watching) + 1) % ids.length] || null; view.smoothInitialized = false; };
+function spectatorIds(){return snapshot?.players.filter(p=>p.p&&p.status==='racing'&&state.players.some(s=>s.id===p.id&&s.connected)).map(p=>p.id)||[];}
+function cycleSpectator(direction){const ids=spectatorIds();watching=ids[(ids.indexOf(watching)+direction+ids.length)%ids.length]||null;view.smoothInitialized=false;}
+$('#next-player').onclick=()=>cycleSpectator(1);$('#previous-player').onclick=()=>cycleSpectator(-1);
+$('#spectator-target').onchange=e=>{watching=e.target.value;view.smoothInitialized=false;};
 $('#personal-result-watch').onclick = hidePersonalResult;
 
 socket.on('connect', () => { text('#connection', 'Connected · ready to play'); if (state) toast('Connected. Rejoining your match…'); updateInput(); });
 socket.on('connect_error', error => { text('#connection', 'Server unavailable'); toast(`Cannot connect to the game server. ${error.message === 'xhr poll error' ? 'Check that the server is running.' : 'Trying again…'}`); });
+socket.on('connect_error', error => { if (error.message.includes('Game updated')) fatal(error.message); });
 socket.on('disconnect', () => { text('#connection', 'Reconnecting…'); input.clear(); input.enabled = false; if (state) toast('Connection lost. Reconnecting… your slot is held for 30 seconds.', true); });
 socket.on('session-expired', () => { storage.set('rumble-session', null); resetMenu(); toast('Your previous slot expired. Create or join a new room.'); });
+socket.on('removed-from-room',()=>{storage.set('rumble-session',null);resetMenu();toast('The host removed you from this room.');});
 socket.on('server-closing', () => toast('The server is restarting. Please reconnect shortly.', true));
 socket.on('welcome', data => {
   myId = data.id; storage.set('rumble-session', data.token);
@@ -150,9 +178,12 @@ socket.on('state', applyState);
 socket.on('player-event', event => {
   if (event.roundKey !== roundKey || event.id !== myId) return;
   if (event.type === 'respawn') { respawnToastUntil = performance.now() + 850; correctionOffset.fill(0); view.smoothInitialized = false; }
-  else showPersonalResult(event.type);
+  else showPersonalResult(event.type,event.cause,event.placement);
 });
-socket.on('snapshot', data => {
+socket.on('frame', frame => {
+  if (!state || frame.roundKey !== roundKey) return;
+  let data;
+  try { data = decodeFrame(frame, state.players, snapshot?.environment); } catch (error) { fatal(error.message); return; }
   if (!state || data.roundKey !== roundKey || data.tick <= lastTick) return;
   lastTick = data.tick; lastSnapshotAt = performance.now(); snapshot = data;
   // Align the clock before converting authoritative cooldowns into deadlines.
@@ -202,6 +233,9 @@ socket.on('snapshot', data => {
     }
   }
   physics?.syncEnvironment(data.environment);
+  physics?.syncObjects(data.objective?.objects);
+  const ownObjective=data.objective?.players.find(p=>p.id===myId),localBean=physics?.players.get(myId);
+  if(localBean)localBean.speedScale=ownObjective?.holding?0.85:1;
   updateInput();
 });
 setInterval(() => {
@@ -217,8 +251,10 @@ function resetMenu() {
   show('#menu', true); $('#settings').close(); view.menu = true; view.loadMap(generateMap({ seed: 'candy-club' })); view.makeShowcase(); selectColor(selectedColor);
 }
 function applyState(next) {
+  if (next.map && !verifyPublicMap(next.map)) { input.enabled = false; fatal('The course data does not match this build. Reload to reconnect safely.'); return; }
   const previousStatus = state?.players.find(p => p.id === myId)?.status;
   state = next;
+  for(const id of view.avatars.keys())if(!next.players.some(p=>p.id===id)){view.removeAvatar(id);physics?.removePlayer(id);}
   const nextStatus = next.players.find(p => p.id === myId)?.status;
   if (previousStatus !== nextStatus) showPersonalResult(nextStatus);
   if (next.phase !== 'playing') hidePersonalResult();
@@ -234,19 +270,19 @@ function applyState(next) {
     hidePersonalResult(); personalStatus = null;
     lastFalls = 0; lastCheckpoint = 0; respawnToastUntil = 0; correctionOffset.fill(0); view.cameraYaw = 0;
     roundKey = next.roundKey; snapshot = null; snapshotQueue = []; lastTick = -1; accumulator = 0; simulationTime = 0; lastTeleport = -1;
-    physics = new PhysicsWorld(next.map); view.loadMap(next.map); view.menu = false; watching = null; input.clear();
+    physics = new PhysicsWorld(next.map, { authoritative:false }); view.loadMap(next.map); view.menu = false; watching = null; input.clear();
     next.players.forEach((p, i) => {
       view.addAvatar(p, p.id === myId);
       if (p.active) physics.addPlayer(p.id, next.map.spawn[next.players.filter(q => q.active).findIndex(q => q.id === p.id)] || next.map.spawn[i], p.id !== myId);
     });
     const survival = next.map.mode === 'survival';
-    text('#map-name', next.map.name); text('#round-kind', next.map.type === 'final' ? survival ? 'LAST BEAN STANDING' : 'FINAL CROWN' : survival ? 'SURVIVAL' : 'RACE');
+    text('#map-name', next.map.name); text('#round-kind',next.settings.practice?'PRACTICE': next.map.mode==='arena'?(next.map.teams?'TEAM ARENA':'ARENA'):next.map.type === 'final' ? survival ? 'LAST BEAN STANDING' : next.map.finish?.crown?'FINAL CROWN':'FINAL RACE' : survival ? 'SURVIVAL' : 'RACE');
     text('#theme-name', `${next.map.theme.name} · ${next.map.difficulty < 0.3 ? 'WARM UP' : next.map.difficulty < 0.65 ? 'PICKING UP' : 'FULL SEND'}`);
     const friendDuel = survival && next.map.type !== 'final' && next.players.filter(p => p.active).length <= next.target;
     text('#objective', next.map.objective + (friendDuel ? ' Two-bean round: falls respawn until the final.' : ''));
     $('#round-track').replaceChildren();
     for (let i = 0; i < next.settings.rounds; i++) { const pip = document.createElement('span'); pip.className = `round-pip ${i < next.round ? 'done' : i === next.round ? 'current' : ''}`; pip.textContent = i === next.settings.rounds - 1 ? '★' : i + 1; pip.title = `Round ${i + 1}`; $('#round-track').append(pip); }
-    show('#touch-grab', !!next.map.finish?.crown);
+    show('#touch-grab', !!next.map.finish?.crown||next.map.mode==='arena');
     beep(500, 0.2);
   }
   if (next.phase === 'playing') document.activeElement?.blur();
@@ -255,19 +291,21 @@ function applyState(next) {
 }
 function updateInput() {
   const own = state?.players.find(p => p.id === myId);
-  input.enabled = !!(socket.connected && state?.phase === 'playing' && own?.status === 'racing' && !(snapshot?.players.find(p => p.id === myId)?.respawnLeft > 0) && !$('#settings').open);
+  input.enabled = !!(socket.connected && state?.phase === 'playing' && own?.status === 'racing' && !snapshot?.objective?.locked && !(snapshot?.players.find(p => p.id === myId)?.respawnLeft > 0) && !$('#settings').open);
   input.inGame = !!(state && state.phase !== 'lobby');
-  $('#reset-checkpoint').hidden = !(state?.phase === 'playing' && state.map.mode === 'race' && own?.status === 'racing');
+  $('#reset-checkpoint').hidden = !(state?.phase === 'playing' && state.map.mode === 'race' && !state.map.extreme && own?.status === 'racing');
   show('#touch-controls', touch && input.enabled);
 }
 function renderLobby() {
   if (!state) return;
-  text('#lobby-code', state.code); text('#lobby-rounds', `${state.settings.rounds} rounds`);
-  text('#lobby-count', `${state.players.length} / 30 players`);
+  text('#lobby-code', state.code); text('#lobby-rounds',state.settings.practice?'Practice · one course':`${state.settings.rounds} rounds · ${state.settings.format==='grandprix'?'Grand Prix':'Knockout'}`);
+  text('#lobby-count', `${state.players.length} / ${state.settings.capacity} players`);
   text('#lobby-title', state.privateRoom ? 'Your room. Your rivals.' : 'Finding your next rivals.');
   const host = state.hostId === myId, connected = state.players.filter(p => p.connected).length;
-  $('#start').disabled = !host || connected < 2 || !state.privateRoom;
-  text('#start', !state.privateRoom ? 'Waiting for players…' : !host ? 'Waiting for the host' : connected < 2 ? 'Waiting for a friend' : 'Everybody in? Let’s rumble.');
+  const minimum=state.settings.objective==='infection'||state.settings.preset==='tag-contagion'?4:state.settings.practice?1:2;
+  $('#start').disabled = !host || connected < minimum || !state.privateRoom;
+  text('#start', !state.privateRoom ? 'Waiting for players…' : !host ? 'Waiting for the host' : connected < minimum ? `Waiting for ${minimum-connected} more player${minimum-connected>1?'s':''}` : state.settings.practice?'Start practice':'Everybody in? Let’s rumble.');
+  show('#edit-room',host&&state.privateRoom);text('#ready',state.players.find(p=>p.id===myId)?.ready?'✓ Ready · click to undo':'I’m ready');
   text('#lobby-hint', host ? 'Share the invite. Start when your friends are here.' : 'The host will start when everyone is ready.');
   $('#roster').replaceChildren();
   $('#course-lineup').replaceChildren();
@@ -275,7 +313,7 @@ function renderLobby() {
     const card = document.createElement('li'); card.className = 'course-card'; card.style.setProperty('--course-color', course.color);
     const number = document.createElement('span'); number.className = 'course-number'; number.textContent = String(i + 1).padStart(2, '0');
     const info = document.createElement('div');
-    const label = document.createElement('small'); label.textContent = course.type === 'final' ? 'THE FINAL' : course.mode === 'survival' ? 'SURVIVE' : 'RACE';
+    const label = document.createElement('small'); label.textContent = course.type === 'final' ? 'THE FINAL' : course.mode==='arena'?'ARENA': course.mode === 'survival' ? 'SURVIVE' : 'RACE';
     const name = document.createElement('strong'); name.textContent = course.name;
     info.append(label, name); card.append(number, info); card.title = course.objective; $('#course-lineup').append(card);
   });
@@ -283,15 +321,21 @@ function renderLobby() {
     const row = document.createElement('div'); row.className = 'roster-player';
     const dot = document.createElement('span'); dot.className = 'bean-dot'; dot.style.setProperty('--swatch', p.color);
     const name = document.createElement('span'); name.className = 'name'; name.textContent = p.name;
-    const role = document.createElement('span'); role.className = 'role'; role.textContent = !p.connected ? 'OFFLINE' : p.id === state.hostId ? 'HOST' : p.id === myId ? 'YOU' : '';
-    row.append(dot, name, role); $('#roster').append(row);
+    const role = document.createElement('span'); role.className = 'role'; role.textContent = !p.connected ? 'OFFLINE' : [p.id===state.hostId?'HOST':p.id===myId?'YOU':'',p.ready?'✓ READY':''].filter(Boolean).join(' · ');
+    row.append(dot, name, role);
+    if(host&&state.privateRoom&&p.id!==myId){
+      const actions=document.createElement('span');actions.className='roster-actions';
+      for(const [label,event]of [['Host','transfer-host'],['Remove','kick']]){const b=document.createElement('button');b.className='text-button';b.textContent=label;b.disabled=event==='transfer-host'&&!p.connected;b.onclick=()=>requestPayload(event,p.id);actions.append(b);}
+      row.append(actions);
+    }
+    $('#roster').append(row);
   }
 }
 function renderResult() {
-  const finished = state.phase === 'finished', qualified = state.qualifiers.includes(myId), winner = state.players.find(p => p.id === state.winner);
+  const finished = state.phase === 'finished', qualified = state.qualifiers.includes(myId), winner = state.players.find(p => p.id === state.winner),shared=state.winnerIds?.length>1,practice=state.settings.practice,gp=state.settings.format==='grandprix';
   text('#result-eyebrow', finished ? 'THAT’S A WRAP' : qualified ? `ROUND ${state.round + 1} COMPLETE` : 'ELIMINATED');
-  text('#result-title', finished ? state.winner === myId ? 'Crown secured!' : winner ? `${winner.name} wins!` : 'No beans left!' : qualified ? 'You’re through!' : 'You’re out.');
-  text('#result-detail', finished ? 'Same friends. New courses. Another shot at the crown?' : qualified ? `${state.qualifiers.length} beans move on. Get ready for the next course.` : 'Your run ended this round. Watch your friends or leave when you’re ready.');
+  text('#result-title',practice?'Practice complete!': finished ? shared?qualified?'Shared victory!':'Joint winners!':state.winner === myId ? 'Crown secured!' : winner ? `${winner.name} wins!` : 'No beans left!' : gp?'Points on the board!':qualified ? 'You’re through!' : 'You’re out.');
+  text('#result-detail',practice?'Try again, or change the focus course in the lobby.':finished ? shared?'These beans finished with a shared winning result.':'Same friends. New courses. Another shot at the crown?' : gp?'Everyone returns next round. Open Players to see the overall points.': qualified ? `${state.qualifiers.length} beans move on. Get ready for the next course.` : 'Your run ended this round. Watch your friends or leave when you’re ready.');
   $('#result-names').replaceChildren();
   for (const id of state.qualifiers) { const p = state.players.find(p => p.id === id); if (!p) continue; const tag = document.createElement('span'); tag.className = 'result-name'; tag.textContent = p.name; $('#result-names').append(tag); }
   show('#rematch', finished && state.hostId === myId); show('#result-leave', finished || !qualified);
@@ -302,13 +346,14 @@ function renderScore() {
   if (!state || $('#scoreboard').hidden) return;
   $('#score-list').replaceChildren();
   const scores = snapshot?.players || [];
-  const roster = [...state.players].sort((a, b) => (scores.find(p => p.id === b.id)?.progress || 0) - (scores.find(p => p.id === a.id)?.progress || 0));
+  const metric=p=>state.settings.format==='grandprix'?p.seriesPoints||0:state.map?.mode==='arena'?scores.find(s=>s.id===p.id)?.score||0:scores.find(s=>s.id===p.id)?.progress||0;
+  const roster = [...state.players].sort((a, b) => metric(b)-metric(a));
   roster.forEach((p, i) => {
     const row = document.createElement('div'); row.className = `score-row ${p.id === myId ? 'you' : ''}`;
     const rank = document.createElement('span'); rank.className = 'position'; rank.textContent = i + 1;
     const dot = document.createElement('span'); dot.className = 'bean-dot'; dot.style.setProperty('--swatch', p.color);
     const name = document.createElement('span'); name.textContent = p.name;
-    const status = document.createElement('span'); status.className = 'status'; status.textContent = !p.connected ? 'RECONNECTING' : p.status.toUpperCase();
+    const status = document.createElement('span'); status.className = 'status'; status.textContent = !p.connected ? 'RECONNECTING' : `${state.settings.format==='grandprix'||state.map?.mode==='arena'?Math.round(metric(p))+' PT · ':''}${p.status.toUpperCase()}`;
     row.append(rank, dot, name, status); $('#score-list').append(row);
   });
 }
@@ -320,9 +365,19 @@ function updateHud(now) {
   }
   const left = Math.ceil(snapshot?.phaseLeft ?? (state.phase === 'countdown' ? RULES.countdown : RULES.raceSeconds));
   text('#timer', `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`);
-  const survival = state.map.mode === 'survival';
-  text('#qualify-label', survival ? 'STILL STANDING' : state.map.type === 'final' ? 'ONE CROWN' : 'QUALIFIED');
-  text('#qualified', survival ? `${snapshot?.alive ?? state.players.filter(p => p.active).length}` : `${snapshot?.qualified || 0} / ${state.target}`);
+  const survival = state.map.mode === 'survival'||OBJECTIVES[state.map.rule]?.elimination,arena=snapshot?.objective;
+  text('#qualify-label',state.settings.practice?'PRACTICE': survival ? 'STILL STANDING' : arena?'YOUR SCORE':state.map.type === 'final' ? 'ONE CROWN' : 'QUALIFIED');
+  text('#qualified', survival ? `${snapshot?.alive ?? state.players.filter(p => p.active).length}` : arena?Math.floor(arena.players.find(p=>p.id===myId)?.score||0):`${snapshot?.qualified || 0} / ${state.target}`);
+  show('#arena-hud',!!arena);
+  if(arena){
+    text('#arena-message',arena.message||state.map.objective);
+    const scores=$('#team-scores');scores.replaceChildren();
+    arena.teams.forEach((score,i)=>{const s=document.createElement('span');s.style.borderColor=TEAM_COLORS[i];s.textContent=`T${i+1} · ${Math.floor(score)}`;scores.append(s);});
+    const ownArena=arena.players.find(p=>p.id===myId);
+    text('#arena-personal',arena.rule==='memory'&&arena.answer!==undefined?`SAFE SYMBOL: ${SYMBOLS[arena.answer]}`:ownArena?`${ownArena.team!==null?'TEAM '+(ownArena.team+1)+' · ':''}${ownArena.tail?'RIBBON SECURED':ownArena.infected?'TAG THE OTHER TEAM':ownArena.holding?'E / X · THROW':arena.rule==='laps'?`LAP ${Math.min(3,ownArena.laps+1)} / 3 · GATE ${ownArena.nextGate+1}`:'E / X · INTERACT'}`:'');
+    show('#pattern-target',!!arena.pattern);
+    if(arena.pattern){$('#pattern-target').replaceChildren();for(let i=0;i<9;i++){const tile=document.createElement('span');const on=arena.pattern[(i%3)*3+Math.floor(i/3)];tile.className=on?'on':'';tile.textContent=on?'●':'·';$('#pattern-target').append(tile);}}
+  }
   text('#countdown', state.phase === 'countdown' ? Math.max(1, left) : '');
   const own = snapshot?.players.find(p => p.id === myId), spectator = own?.status && own.status !== 'racing';
   show('#respawn-banner', state.phase === 'playing' && own?.status === 'racing' && now < respawnToastUntil);
@@ -332,8 +387,13 @@ function updateHud(now) {
   text('#status-banner', own?.status === 'qualified' ? 'QUALIFIED · WATCHING' : 'YOU’RE OUT · WATCHING');
   show('#spectator', state.phase === 'playing' && !!spectator);
   const watched = state.players.find(p => p.id === watching); text('#watching', watched ? `Watching ${watched.name}` : 'Waiting for the next round');
+  if(spectator){
+    const ids=spectatorIds(),select=$('#spectator-target'),key=ids.join(',');
+    if(select.dataset.targets!==key){select.dataset.targets=key;select.replaceChildren();for(const id of ids){const option=document.createElement('option');option.value=id;option.textContent=state.players.find(p=>p.id===id)?.name||'Bean';select.append(option);}}
+    select.value=watching||'';select.disabled=!ids.length;$('#next-player').disabled=ids.length<2;$('#previous-player').disabled=ids.length<2;
+  }
   if (state.phase === 'results') text('#next-round-time', `Next course in ${left}…`);
-  if (state.phase === 'playing' && left <= 15 && left > 0) text('#objective', survival ? state.map.variant === 'tilefall' ? 'At the horn: highest layer, then fewest hits.' : 'At the horn: fewest hits, then closest to center.' : 'At the horn: furthest checkpoint, then progress.');
+  if (!arena&&state.phase === 'playing' && left <= 15 && left > 0) text('#objective', survival ? state.map.variant === 'tilefall' ? 'At the horn: highest layer, then fewest hits.' : 'At the horn: fewest hits, then closest to center.' : 'At the horn: furthest checkpoint, then progress.');
   text('#net-status', socket.connected ? `${networkRtt} ms` : 'RECONNECTING');
   const cooldown = physics?.players.get(myId)?.nextDive - simulationTime || 0;
   $('#dive-fill').style.transform = `scaleX(${Math.max(0, 1 - cooldown / RULES.diveCooldown)})`;
@@ -367,14 +427,14 @@ function frame(now) {
   let followState = renderStates.get(myId);
   let follow = followState?.p;
   if (!follow) {
-    if (!renderStates.get(watching)?.p) watching = [...renderStates.values()].find(p => p.p)?.id || null;
+    const eligible=spectatorIds();if (!renderStates.get(watching)?.p||!eligible.includes(watching)) watching =eligible.find(id=>renderStates.get(id)?.p)||null;
     followState = renderStates.get(watching);
     follow = followState?.p;
   }
   if (!follow && state?.map) follow = state.map.spawn[0];
   const time = state?.phase === 'playing' ? (snapshot?.time || 0) + Math.min(0.2, (now - lastSnapshotAt) / 1000) : snapshot?.time || 0;
   for (const p of state?.players || []) view.updateAvatar(p.id, renderStates.get(p.id), time, delta);
-  view.render(delta, state ? time : now / 1000, follow, followState, now / 1000, snapshot?.environment);
+  view.render(delta, state ? time : now / 1000, follow, followState, now / 1000, snapshot?.environment,snapshot?.objective);
   if (now - uiAt > 100) { updateHud(now); uiAt = now; }
   frameCount++;
   if (now - fpsAt > 1000) { text('#fps', `${Math.round(frameCount * 1000 / (now - fpsAt))} FPS`); frameCount = 0; fpsAt = now; }

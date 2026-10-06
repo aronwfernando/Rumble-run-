@@ -1,0 +1,21 @@
+{
+  "assets": [
+    {
+      "path": "dist/index.html",
+      "bytes": 12456,
+      "gzipBytes": 4028
+    },
+    {
+      "path": "dist/assets/index-DYoBugQ5.js",
+      "bytes": 759981,
+      "gzipBytes": 201881
+    },
+    {
+      "path": "dist/assets/index-CVgWnfVk.css",
+      "bytes": 20740,
+      "gzipBytes": 5319
+    }
+  ],
+  "totalGzipBytes": 211228,
+  "scope": "HTML, JS and CSS only. Socket transport, map download, headers and favicons excluded."
+}

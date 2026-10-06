@@ -3,15 +3,26 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { DT, MAX_PLAYERS, RULES, roundType, qualificationTarget, EMPTY_INPUT } from '../shared/config.js';
 import { generateMap, crownHeight } from '../shared/maps.js';
 import { PhysicsWorld } from '../shared/physics.js';
+import { PRESETS, RACE_PRESETS, presetMap } from '../shared/presets.js';
+import { resolveSecrets } from './map-manifests.js';
+import { shuffle } from '../shared/course-catalog.js';
+import { random } from '../shared/random.js';
+import { createArena } from '../shared/arenas.js';
+import { OBJECTIVES } from '../shared/objectives.js';
+import { ObjectiveRound } from './objective-round.js';
+import { cleanSettings } from './validation.js';
 
 export class Tournament extends EventEmitter {
-  constructor(code, { privateRoom = true, rounds = 6, seed = '', difficulty = 'normal', playlist = 'mixed', timings = {} } = {}) {
+  constructor(code, { privateRoom = true, rounds = 6, seed = '', difficulty = 'normal', playlist = 'mixed', content = 'procedural', preset = '', theme = '', capacity = 16, objective = '', practice = false, format = 'knockout', timings = {} } = {}) {
     super();
     this.code = code;
     this.privateRoom = privateRoom;
-    this.settings = { rounds, seed, difficulty, playlist };
+    this.settings = { rounds:practice?1:rounds, seed, difficulty, playlist, content, preset, theme, capacity, objective, practice, format };
+    this.secretSeed = randomBytes(16).toString('hex');
     this.rules = { ...RULES, ...timings };
     this.players = new Map();
+    this.nextNetId = 0;
+    this.revision = 0;
     this.hostId = null;
     this.phase = 'lobby';
     this.phaseTime = 0;
@@ -29,10 +40,20 @@ export class Tournament extends EventEmitter {
   }
   prepareCourses() {
     const offset = this.settings.difficulty === 'easy' ? -0.22 : this.settings.difficulty === 'hard' ? 0.25 : 0;
+    const raceDeck = shuffle(RACE_PRESETS, random(this.seed + ':presets'));
     this.courseDeck = Array.from({ length: this.settings.rounds }, (_, round) => {
       const final = round === this.settings.rounds - 1;
       const type = final ? 'final' : this.settings.playlist === 'races' ? 'race' : roundType(round, this.settings.rounds);
-      return generateMap({ seed: this.seed, round, type, raceIndex: this.settings.playlist === 'races' ? round : Math.floor(round / 2), difficulty: Math.max(0, Math.min(1, round / (this.settings.rounds - 1) * 0.8 + offset)), variant: final && this.settings.playlist === 'races' ? 'crown-climb' : undefined });
+      const options = { seed: this.seed, round, type, themeId:this.settings.theme, raceIndex: this.settings.playlist === 'races' ? round : Math.floor(round / 2), difficulty: Math.max(0, Math.min(1, round / Math.max(1, this.settings.rounds - 1) * 0.8 + offset)), variant: final && this.settings.playlist === 'races' ? 'crown-climb' : undefined };
+      const selected=PRESETS.find(p=>p.id===this.settings.preset);
+      if(this.settings.objective||selected?.type==='objective')return createArena(this.settings.objective||selected.rule,{...options,type:final?'final':'objective'});
+      if(this.settings.playlist==='party'&&!final&&round%2===1){const deck=shuffle(Object.keys(OBJECTIVES).filter(id=>id!=='infection'),random(this.seed+':arenas'));return createArena(deck[Math.floor(round/2)%deck.length],{...options,type:'objective'});}
+      if (this.settings.preset) {const map=presetMap(this.settings.preset, options);map.type=final?'final':map.mode==='survival'?'survival':'race';return map;}
+      if (this.settings.content === 'presets' || this.settings.content === 'blend' && round % 2 === 0) {
+        const choices = type === 'race' ? raceDeck : PRESETS.filter(p => p.type === type);
+        return presetMap(choices[(type === 'race' ? options.raceIndex : Math.floor(round / 2)) % choices.length].id, options);
+      }
+      return generateMap(options);
     });
   }
   get roundKey() { return `${this.tournamentId}:${this.round}`; }
@@ -42,8 +63,10 @@ export class Tournament extends EventEmitter {
 
   addHuman({ id = randomUUID(), name, color }) {
     if (this.phase !== 'lobby') throw new Error('This match has started. Ask the host for a new lobby.');
-    if (this.players.size >= MAX_PLAYERS) throw new Error('This room is full.');
+    if (this.players.size >= Math.min(MAX_PLAYERS, this.settings.capacity)) throw new Error('This room is full.');
     const p = { id, name, color, connected: true, active: true, status: 'waiting', checkpoint: 0, progress: 0, lastSeq: -1, input: EMPTY_INPUT, lastInput: -10, jumps: 0, dives: 0, grabs: 0, grabUntil: 0, pendingJump: false, pendingDive: false, pendingGrab: false };
+    p.netId = ++this.nextNetId;
+    p.ready=false;p.seriesPoints=0;
     this.players.set(id, p);
     if (!this.hostId) this.hostId = id;
     this.emitState();
@@ -53,7 +76,8 @@ export class Tournament extends EventEmitter {
   start(id) {
     if (id !== this.hostId) throw new Error('Only the host can start the match.');
     if (this.phase !== 'lobby') throw new Error('A match is already running.');
-    if (this.connectedHumans.length < 2) throw new Error('Invite at least one friend to start.');
+    const minimum=this.settings.objective==='infection'||this.settings.preset==='tag-contagion'?4:this.settings.practice?1:2;
+    if (this.connectedHumans.length < minimum) throw new Error(minimum===2?'Invite at least one friend to start.':`This mode needs ${minimum} players.`);
     this.round = 0;
     this.beginRound();
   }
@@ -62,33 +86,48 @@ export class Tournament extends EventEmitter {
     if (id !== this.hostId || this.phase !== 'finished') throw new Error('The host can restart after the tournament.');
     for (const [key, p] of this.players) {
       if (!p.connected) this.players.delete(key);
-      else { p.active = true; p.status = 'waiting'; p.progress = 0; p.checkpoint = 0; delete p.eliminatedRound; }
+      else { p.active = true; p.status = 'waiting'; p.progress = 0; p.checkpoint = 0; p.seriesPoints=0;p.ready=false;delete p.eliminatedRound; }
     }
     this.phase = 'lobby'; this.phaseTime = 0; this.round = -1;
-    this.map = null; this.physics = null; this.winner = null; this.results = [];
+    this.map = null; this.physics = null; this.objective=null;this.winner = null;this.winnerIds=[];this.winnerTeams=[]; this.results = [];
     this.seed = this.settings.seed || randomBytes(5).toString('hex');
     this.tournamentId = randomUUID();
     this.prepareCourses();
     this.emitState();
   }
 
+  editSettings(id, payload) {
+    if(id!==this.hostId||this.phase!=='lobby'||!this.privateRoom)throw new Error('Only the host can edit a waiting private room.');
+    const settings=cleanSettings({...this.settings,...payload});
+    if(settings.capacity<this.players.size)throw new Error('Capacity must include everyone in this room.');
+    this.settings=settings;this.seed=settings.seed||this.seed;this.prepareCourses();
+    for(const p of this.players.values())p.ready=false;
+    this.emitState();
+  }
+  setReady(id, ready) {const p=this.players.get(id);if(!p||this.phase!=='lobby')throw new Error('Ready is available in the lobby.');p.ready=!!ready;this.emitState();}
+  transferHost(id, target) {if(!this.privateRoom||this.phase!=='lobby'||id!==this.hostId||!this.players.get(target)?.connected)throw new Error('The host can choose a connected player in a waiting private room.');this.hostId=target;this.emitState();}
+
   beginRound() {
     this.map = this.courseDeck[this.round];
+    this.publicMap = resolveSecrets(this.map, this.secretSeed + ':' + this.round).public;
     const type = this.map.type;
     this.physics = new PhysicsWorld(this.map);
     this.time = 0; this.phase = 'countdown'; this.phaseTime = 0;
-    this.qualifiers = []; this.results = [];
+    this.qualifiers = []; this.results = [];this.winnerTeams=[];
     const active = [...this.players.values()].filter(p => p.active);
     this.roundEntrants = active.length;
     this.target = qualificationTarget(active.length, this.round, this.settings.rounds);
+    if(this.settings.format==='grandprix')this.target=active.length;
     this.roundLimit = type === 'survival' ? this.rules.survivalSeconds : type === 'final' ? this.rules.finalSeconds : this.rules.raceSeconds;
     active.forEach((p, i) => {
-      p.status = 'racing'; p.checkpoint = 0; p.progress = 0; p.falls = 0;
+      p.status = 'racing'; p.checkpoint = 0; p.progress = 0; p.falls = 0;p.score=0;p.cause=null;p.grabPulse=false;
       p.respawnUntil = 0; p.nextReset = 0;
       p.input = EMPTY_INPUT; p.lastInput = this.time; p.pendingJump = false; p.pendingDive = false;
       p.pendingGrab = false; p.grabUntil = 0;
       this.physics.addPlayer(p.id, this.map.spawn[i]);
     });
+    this.gameLockedUntil=0;
+    this.objective=this.map.mode==='arena'?new ObjectiveRound(this):null;
     this.emitState();
   }
 
@@ -110,13 +149,14 @@ export class Tournament extends EventEmitter {
     p.falls++;
     p.respawnUntil = this.time + 0.65;
     p.nextReset = this.time + 2;
+    p.previousArenaPosition=null;
     p.input = EMPTY_INPUT; p.pendingJump = false; p.pendingDive = false;
     this.emit('player-event', { roundKey: this.roundKey, id: p.id, type: 'respawn', checkpoint: p.checkpoint });
   }
 
   resetCheckpoint(id) {
     const p = this.players.get(id);
-    if (!p || this.phase !== 'playing' || p.status !== 'racing' || this.map.mode !== 'race') throw new Error('Checkpoint reset is available while racing.');
+    if (!p || this.phase !== 'playing' || p.status !== 'racing' || this.map.mode !== 'race' || this.map.extreme) throw new Error('Checkpoint reset is available while racing with respawns.');
     if (this.time < p.nextReset) throw new Error('Wait a moment before resetting again.');
     const c = this.map.checkpoints[p.checkpoint];
     this.respawn(p, [c.x, c.y + 0.4, c.z - 0.5]);
@@ -128,6 +168,7 @@ export class Tournament extends EventEmitter {
     p.connected = connected;
     p.input = EMPTY_INPUT; p.pendingJump = false; p.pendingDive = false;
     p.pendingGrab = false;
+    if(!connected)this.objective?.drop(p);
     if (!connected && id === this.hostId) this.hostId = this.connectedHumans[0]?.id || id;
     this.emitState();
   }
@@ -135,6 +176,7 @@ export class Tournament extends EventEmitter {
   leave(id) {
     const p = this.players.get(id);
     if (!p) return;
+    this.objective?.drop(p);
     this.physics?.removePlayer(id);
     this.players.delete(id);
     this.qualifiers = this.qualifiers.filter(key => key !== id);
@@ -163,26 +205,28 @@ export class Tournament extends EventEmitter {
     const inputs = new Map();
     for (const p of this.competitors) {
       {
-        const valid = p.connected && this.time >= p.respawnUntil && this.time - p.lastInput <= this.rules.inputTimeout;
+        const valid = p.connected && this.time >= p.respawnUntil && this.time >= (this.gameLockedUntil||0) && this.time - p.lastInput <= this.rules.inputTimeout;
         inputs.set(p.id, valid ? { ...p.input, jump: p.pendingJump, dive: p.pendingDive } : EMPTY_INPUT);
+        p.grabPulse=valid&&p.pendingGrab;
         if (valid && p.pendingGrab) p.grabUntil = this.time + 0.25;
         p.pendingGrab = false;
         p.pendingJump = false; p.pendingDive = false;
       }
     }
     this.physics.step(inputs, this.time);
+    if(this.objective){this.objective.step();return;}
     const survival = this.map.mode === 'survival';
     for (const p of this.competitors) {
       const pp = this.physics.players.get(p.id);
       if (!pp) continue;
       const pos = pp.body.position;
-      const killY = this.map.slime ? this.map.slime.start + this.time * this.map.slime.speed + 0.5 : survival ? this.map.killY ?? -14 : this.map.checkpoints[p.checkpoint].y - 7;
+      const killY = this.map.slime ? this.map.slime.start + Math.max(0, this.time - (this.map.slime.delay || 0)) * this.map.slime.speed + 0.5 : survival ? this.map.killY ?? -14 : this.map.checkpoints[p.checkpoint].y - 7;
       if (!Number.isFinite(pos.x + pos.y + pos.z) || pos.y < killY || Math.abs(pos.x) > 150) {
-        if (survival) {
+        if (survival || this.map.extreme) {
           // Preserve the final two in earlier rounds. Friend duels should
           // reach their chosen finale; simultaneous falls also cannot take
           // a qualifying group below its target in one physics tick.
-          if (this.map.type !== 'final' && this.competitors.length <= this.target) {
+          if (this.settings.practice || survival && this.settings.format!=='grandprix' && this.map.type !== 'final' && this.competitors.length <= this.target) {
             const safe = [...this.physics.platforms.values()].filter(floor => !floor.removed && (floor.dropAt === null || floor.dropAt > this.time + 1) && floor.body.position.y + 1.7 > killY + 0.3)
               .sort((a, b) => b.body.position.y - a.body.position.y || Math.hypot(a.body.position.x, a.body.position.z) - Math.hypot(b.body.position.x, b.body.position.z))[0];
             if (!safe) { this.endRound(this.competitors.map(bean => bean.id)); return; }
@@ -190,9 +234,10 @@ export class Tournament extends EventEmitter {
             pp.hits++;
           } else {
             p.status = 'eliminated'; p.active = false; p.outAt = this.time;
+            p.cause=this.map.slime?'Caught by the rising slime':'Fell out of the course';
             p.eliminatedRound = this.round;
             this.physics.removePlayer(p.id);
-            this.emit('player-event', { roundKey: this.roundKey, id: p.id, type: 'eliminated' });
+            this.emit('player-event', { roundKey: this.roundKey, id: p.id, type: 'eliminated',cause:p.cause });
           }
         } else {
           const c = this.map.checkpoints[p.checkpoint];
@@ -214,12 +259,12 @@ export class Tournament extends EventEmitter {
           p.finishTime = this.time;
           this.qualifiers.push(p.id);
           this.physics.removePlayer(p.id);
-          this.emit('player-event', { roundKey: this.roundKey, id: p.id, type: 'qualified' });
+          this.emit('player-event', { roundKey: this.roundKey, id: p.id, type: 'qualified',placement:this.qualifiers.length });
           if (this.qualifiers.length >= this.target) break;
         }
       }
     }
-    if (survival && this.competitors.length <= this.target && (this.roundEntrants > this.target || this.competitors.length < this.roundEntrants)) this.endRound(this.competitors.map(p => p.id));
+    if ((survival || this.map.extreme) && (this.settings.format==='grandprix'?this.competitors.length===0:this.competitors.length + this.qualifiers.length <= this.target && (this.roundEntrants > this.target || this.competitors.length + this.qualifiers.length < this.roundEntrants))) this.endRound([...this.qualifiers,...this.competitors.map(p => p.id)]);
     else if (this.qualifiers.length >= this.target) this.endRound(this.qualifiers);
     else if (this.time >= this.roundLimit) {
       // Tile survival rewards the highest remaining layer at the horn.
@@ -236,30 +281,50 @@ export class Tournament extends EventEmitter {
 
   endRound(ids) {
     if (this.phase !== 'playing') return;
-    const winners = ids.filter(id => this.players.has(id));
+    let winners = ids.filter(id => this.players.has(id));
     const last = this.round === this.settings.rounds - 1;
+    if(last&&!winners.length&&(this.map.mode==='survival'||this.map.extreme)){
+      const fallen=this.humans.filter(p=>p.outAt!==undefined),latest=Math.max(...fallen.map(p=>p.outAt));
+      winners=fallen.filter(p=>Math.abs(p.outAt-latest)<0.0001).map(p=>p.id);
+    }
+    const series=this.settings.format==='grandprix';
+    if(series){
+      const placed=[...winners,...[...this.players.values()].filter(p=>!winners.includes(p.id)).sort((a,b)=>b.score-a.score||b.progress-a.progress||a.falls-b.falls).map(p=>p.id)];
+      placed.forEach((id,index)=>{
+        const p=this.players.get(id);
+        if(this.objective?.teamCount)p.seriesPoints+=winners.includes(id)?15:5;
+        else if(this.objective&&this.objective.rule!=='laps'){
+          const better=this.humans.filter(other=>this.objective.definition.elimination?(other.outAt??Infinity)>(p.outAt??Infinity):other.score>p.score).length;
+          p.seriesPoints+=Math.max(1,15-better*2);
+        }else p.seriesPoints+=Math.max(1,15-index*2);
+      });
+      if(last){const top=Math.max(...this.humans.map(p=>p.seriesPoints));winners=this.humans.filter(p=>p.seriesPoints===top).map(p=>p.id);}
+      else winners=this.humans.map(p=>p.id);
+    }
     this.qualifiers = winners;
     this.results = [...this.players.values()].filter(p => p.active || p.outAt !== undefined).map(p => ({ id: p.id, qualified: winners.includes(p.id), progress: p.progress, time: p.finishTime ?? null }));
     for (const p of this.players.values()) {
       p.active = winners.includes(p.id);
+      if(!p.active&&!p.cause)p.cause=this.time>=this.roundLimit?'Time ran out':'Qualification places filled';
       if (!p.active && p.eliminatedRound === undefined) p.eliminatedRound = this.round;
       p.status = p.active ? 'qualified' : 'eliminated';
       delete p.outAt; delete p.finishTime;
     }
     this.phaseTime = 0;
-    if (last || winners.length <= 1) {
+    if (last || !series && winners.length <= 1) {
       this.phase = 'finished';
       this.winner = winners[0] || null;
+      this.winnerIds=winners;
     } else this.phase = 'results';
     this.emitState();
   }
 
   state() {
-    return { code: this.code, privateRoom: this.privateRoom, hostId: this.hostId, settings: this.settings, seed: this.seed, courses: this.courseDeck.map(map => ({ name: map.name, type: map.type, mode: map.mode, family: map.family, color: map.theme.accent, objective: map.objective })), roundKey: this.roundKey, round: this.round, phase: this.phase, target: this.target, map: this.map, winner: this.winner, qualifiers: this.qualifiers, results: this.results, players: [...this.players.values()].map(p => ({ id: p.id, name: p.name, color: p.color, connected: p.connected, active: p.active, status: p.status })) };
+    return { revision: this.revision, code: this.code, privateRoom: this.privateRoom, hostId: this.hostId, settings: this.settings, seed: this.seed, courses: this.courseDeck.map(map => ({ name: map.name, type: map.type, mode: map.mode, family: map.family, color: map.theme.accent, objective: map.objective })), roundKey: this.roundKey, round: this.round, phase: this.phase, target: this.target, map: this.map ? this.publicMap : null, winner: this.winner, winnerIds:this.winnerIds||[], winnerTeams:this.winnerTeams||[], qualifiers: this.qualifiers, results: this.results, players: [...this.players.values()].map(p => ({ id: p.id, netId: p.netId, name: p.name, color: p.color, connected: p.connected, active: p.active, status: p.status, ready:p.ready, team:p.team, seriesPoints:p.seriesPoints, cause:p.cause })) };
   }
-  emitState() { this.emit('state', this.state()); }
+  emitState() { this.revision++; this.emit('state', this.state()); }
   snapshot() {
     const phaseLeft = this.phase === 'playing' ? Math.max(0, this.roundLimit - this.time) : this.phase === 'countdown' ? Math.max(0, this.rules.countdown - this.phaseTime) : this.phase === 'results' ? Math.max(0, this.rules.intermission - this.phaseTime) : this.phase === 'lobby' && !this.privateRoom ? Math.max(0, 8 - this.phaseTime) : 0;
-    return { roundKey: this.roundKey, tick: this.tick, phase: this.phase, time: this.time, phaseLeft, target: this.target, qualified: this.qualifiers.length, alive: this.competitors.length, environment: this.physics?.environmentSnapshot(), players: [...this.players.values()].map(p => ({ ...this.physics?.snapshot(p.id), id: p.id, seq: p.lastSeq, status: p.status, respawnLeft: Math.max(0, (p.respawnUntil || 0) - this.time), falls: p.falls || 0, progress: Math.round(p.progress * 100) / 100, checkpoint: p.checkpoint })) };
+    return { roundKey: this.roundKey, tick: this.tick, phase: this.phase, time: this.time, phaseLeft, target: this.target, qualified: this.qualifiers.length, alive: this.competitors.length, environment: this.physics?.environmentSnapshot(), objective:this.objective?.snapshot(), players: [...this.players.values()].map(p => ({ ...this.physics?.snapshot(p.id), id: p.id, netId: p.netId, seq: p.lastSeq, status: p.status, respawnLeft: Math.max(0, (p.respawnUntil || 0) - this.time), falls: p.falls || 0, score:p.score||0, progress: Math.round(p.progress * 100) / 100, checkpoint: p.checkpoint })) };
   }
 }

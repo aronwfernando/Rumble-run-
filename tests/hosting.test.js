@@ -2,14 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { io as connect } from 'socket.io-client';
 import { createGameServer } from '../server.js';
+import { PROTOCOL_VERSION, decodeFrame } from '../shared/protocol.js';
 
 function nextEvent(socket, event, timeout = 4000, predicate = () => true) {
+  const snapshot = event === 'snapshot'; if (snapshot) event = 'frame';
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       socket.off(event, received);
       reject(new Error(`Timed out waiting for ${event}`));
     }, timeout);
     function received(value) {
+      if (snapshot) value = decodeFrame(value, socket.testRoster || []);
       if (!predicate(value)) return;
       clearTimeout(timer);
       socket.off(event, received);
@@ -32,13 +35,60 @@ async function fixture(t, options = {}) {
     const socket = connect(origin, {
       autoConnect: false, forceNew: true, reconnection: false,
       transports: ['websocket'], extraHeaders: { Origin: browserOrigin },
-      auth: { token },
+      auth: { token, protocol: PROTOCOL_VERSION },
     });
+    socket.on('welcome', data => socket.testRoster = data.state.players);
+    socket.on('state', data => socket.testRoster = data.players);
     clients.push(socket);
     return socket;
   }
   return { game, origin, client };
 }
+
+test('real room sockets enforce host settings, readiness, transfer and removal',async t=>{
+  const {game,client}=await fixture(t);
+  const host=client(),friend=client();const joined=Promise.all([nextEvent(host,'connect'),nextEvent(friend,'connect')]);host.connect();friend.connect();await joined;
+  const welcome=nextEvent(host,'welcome');await host.timeout(4000).emitWithAck('join',{mode:'create',name:'Host'});const identity=await welcome;
+  const fw=nextEvent(friend,'welcome');await friend.timeout(4000).emitWithAck('join',{mode:'join',name:'Friend',code:identity.state.code});const f=await fw;
+  assert.match((await friend.timeout(4000).emitWithAck('room-settings',{rounds:8})).error,/host/);
+  await friend.timeout(4000).emitWithAck('ready',true);
+  const room=game.rooms.get(identity.state.code);assert.equal(room.players.get(f.id).ready,true);
+  const changed=await host.timeout(4000).emitWithAck('room-settings',{format:'grandprix',rounds:10,objective:'football',theme:'pirate-islands'});
+  assert.equal(changed.ok,true);assert.equal(room.players.get(f.id).ready,false);assert.equal(room.courseDeck.length,10);
+  assert.equal((await host.timeout(4000).emitWithAck('transfer-host',f.id)).ok,true);
+  assert.match((await host.timeout(4000).emitWithAck('start')).error,/host/);
+  const removed=nextEvent(host,'removed-from-room');assert.equal((await friend.timeout(4000).emitWithAck('kick',identity.id)).ok,true);await removed;
+  assert.equal(room.players.size,1);assert.equal(game.sessions.has(identity.token),false);
+});
+
+test('two real clients receive the same arena object owner, goal score and reconnect state',async t=>{
+  const {game,client}=await fixture(t,{timings:{countdown:0}});
+  const host=client(),friend=client();const joined=Promise.all([nextEvent(host,'connect'),nextEvent(friend,'connect')]);host.connect();friend.connect();await joined;
+  const welcome=nextEvent(host,'welcome');await host.timeout(4000).emitWithAck('join',{mode:'create',name:'Host',objective:'basketball'});const identity=await welcome;
+  await friend.timeout(4000).emitWithAck('join',{mode:'join',name:'Friend',code:identity.state.code});await host.timeout(4000).emitWithAck('start');
+  const room=game.rooms.get(identity.state.code);while(room.phase!=='playing')await nextEvent(host,'snapshot');
+  const ball=room.physics.objects.get('ball');room.physics.teleport(identity.id,[0,1,0]);room.players.get(identity.id).respawnUntil=0;room.physics.players.get(identity.id).respawnUntil=0;ball.body.position.set(0,1,-1);
+  host.emit('input',{roundKey:room.roundKey,seq:1,x:0,z:0,jump:0,dive:0,grab:1});
+  const owned=await Promise.all([host,friend].map(s=>nextEvent(s,'snapshot',4000,f=>f.objective?.objects[0].owner===identity.id)));
+  assert.equal(owned[0].objective.objects[0].owner,owned[1].objective.objects[0].owner);
+  room.objective.drop(room.players.get(identity.id));room.objective.goal(0,ball);
+  const scored=await Promise.all([host,friend].map(s=>nextEvent(s,'snapshot',4000,f=>f.objective?.teams[0]===1)));
+  assert.deepEqual(scored[0].objective.teams,scored[1].objective.teams);
+  host.disconnect();const reconnected=client(undefined,identity.token);const resumed=nextEvent(reconnected,'welcome');reconnected.connect();assert.equal((await resumed).id,identity.id);
+  const frame=await nextEvent(reconnected,'snapshot');assert.deepEqual(frame.objective.teams,[1,0]);assert.equal(room.players.size,2);
+});
+
+test('sixteen WebSocket clients agree on the winner through a four-round tournament',async t=>{
+  const {game,client}=await fixture(t,{timings:{countdown:0,intermission:0,raceSeconds:.15,survivalSeconds:.15,finalSeconds:.15}});
+  const clients=Array.from({length:16},()=>client());const connections=clients.map(s=>nextEvent(s,'connect'));clients.forEach(s=>s.connect());await Promise.all(connections);
+  const welcome=nextEvent(clients[0],'welcome');await clients[0].timeout(4000).emitWithAck('join',{mode:'create',name:'Load test 1',rounds:4,capacity:16,seed:'sixteen-sockets'});const identity=await welcome;
+  const joined=await Promise.all(clients.slice(1).map((s,i)=>s.timeout(4000).emitWithAck('join',{mode:'join',name:'Load test '+(i+2),code:identity.state.code})));
+  assert.ok(joined.every(result=>result.ok));
+  const endings=clients.map(s=>nextEvent(s,'state',5000,value=>value.phase==='finished'));
+  await clients[0].timeout(4000).emitWithAck('start');const results=await Promise.all(endings);
+  assert.ok(results[0].winner);assert.ok(results.every(r=>r.round===3&&r.winner===results[0].winner&&r.players.length===16));
+  assert.equal(game.rooms.get(identity.state.code).players.size,16);
+});
 
 test('production server supports two browser clients joining and starting a private match', async t => {
   const { game, origin, client } = await fixture(t);

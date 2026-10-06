@@ -62,7 +62,7 @@ export class InputController {
     const endLook = () => { lookPointer = null; };
     canvas.addEventListener('pointerup', endLook); canvas.addEventListener('pointercancel', endLook); canvas.addEventListener('lostpointercapture', endLook);
   }
-  action(name) { this.pulses[name] = true; this.counters[name]++; this.onAction?.(name); }
+  action(name) { if(name==='jump'&&this.airJumpDive&&this.isAirborne?.())name='dive';this.pulses[name] = true; this.counters[name]++; this.onAction?.(name); }
   clear() { this.keys.clear(); this.axes = { x: 0, z: 0 }; this.pulses = { jump: false, dive: false, grab: false }; this.resetStick?.(); this.onChange?.(); }
   pollGamepad(delta) {
     let pad;

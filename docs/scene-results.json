@@ -1,0 +1,47 @@
+{
+  "scope": "Scene graph and draw submission estimates with a recording renderer. No actual WebGL/GPU or frame-time measurement.",
+  "measurements": [
+    {
+      "mode": "memory",
+      "players": 30,
+      "drawSubmissions": 24,
+      "triangles": 34588
+    },
+    {
+      "mode": "rolling",
+      "players": 30,
+      "drawSubmissions": 6,
+      "triangles": 35252
+    },
+    {
+      "mode": "pattern",
+      "players": 30,
+      "drawSubmissions": 12,
+      "triangles": 35276
+    },
+    {
+      "mode": "football",
+      "players": 30,
+      "drawSubmissions": 12,
+      "triangles": 35336
+    },
+    {
+      "mode": "blast",
+      "players": 30,
+      "drawSubmissions": 8,
+      "triangles": 34696
+    },
+    {
+      "mode": "charge",
+      "players": 30,
+      "drawSubmissions": 8,
+      "triangles": 34484
+    },
+    {
+      "mode": "reactive",
+      "players": 30,
+      "drawSubmissions": 9,
+      "triangles": 35036
+    }
+  ]
+}

@@ -1,3 +1,20 @@
+# Rumble Run 1.2.0
+
+- Added solo practice, 4–10-round Grand Prix, Party arenas and focus-course selection.
+- Added 23 original arena rules and 23 ordered/reference-inspired presets. Sports,
+  carrying, ribbons, memory, 3×3 patterns and survival hazards now use server rules
+  and matching HUD/geometry. These are approximations, not exact reference maps.
+- Added eight distinct scenic themes; retained generated layouts and human-only play.
+- Added room capacity, ready indicators, editable settings, host transfer and kick.
+- Added camera collision avoidance, optional second-press dive, look inversion,
+  persistent browser preferences and selectable/previous spectator targets.
+- Added instanced geometry batching and compact protocol-2 player/object snapshots.
+- Fixed disconnected object holders, departed-avatar ghosts, final preset rules,
+  repeated goal scoring, memory-floor restoration and simultaneous final results.
+- Added a requirement ledger, reference catalogue, performance report and explicit
+  remaining work. Persistent accounts, economy, creator publishing, advanced modes
+  and the complete expansion specification remain unfinished.
+
 # Rumble Run 1.1.0
 
 - Fixed wall sticking caused by physics friction counteracting gravity. Course

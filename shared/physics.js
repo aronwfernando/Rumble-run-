@@ -9,7 +9,7 @@ const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
  * The client can predict only its own body; it never decides winners or sends poses.
  */
 export class PhysicsWorld {
-  constructor(map) {
+  constructor(map, { authoritative = true } = {}) {
     this.map = map;
     this.time = 0;
     this.world = new CANNON.World({ gravity: new CANNON.Vec3(0, RULES.gravity, 0), allowSleep: false });
@@ -22,11 +22,19 @@ export class PhysicsWorld {
     this.players = new Map();
     this.platforms = new Map();
     this.hazards = new Map();
+    this.objects = new Map();
     this.broken = new Set();
     this.pendingBreaks = new Set();
     for (const p of map.platforms) {
       const shape = p.radius ? new CANNON.Cylinder(p.radius, p.radius, p.size[1], p.sides || 12) : new CANNON.Box(vec(p.size.map(v => v / 2)));
-      const body = new CANNON.Body({ mass: 0, type: p.seesaw || p.turntable ? CANNON.Body.KINEMATIC : CANNON.Body.STATIC, shape, position: vec(p.position), collisionFilterGroup: 1, collisionFilterMask: 2 });
+      const body = new CANNON.Body({ mass: 0, type: p.seesaw || p.turntable || p.drum ? CANNON.Body.KINEMATIC : CANNON.Body.STATIC, position: vec(p.position), collisionFilterGroup: 1, collisionFilterMask: 6 });
+      if (p.drum) {
+        for (let i = 0; i < 20; i++) {
+          if (i === p.drum.gap || i === p.drum.gap + 1) continue;
+          const a = i / 20 * Math.PI * 2, q = new CANNON.Quaternion(); q.setFromEuler(a, 0, 0);
+          body.addShape(new CANNON.Box(new CANNON.Vec3(p.drum.span / 2, 0.4, 0.64)), new CANNON.Vec3(0, Math.cos(a) * p.drum.radius, Math.sin(a) * p.drum.radius), q);
+        }
+      } else body.addShape(shape);
       body.quaternion.setFromEuler(...p.rotation);
       body.platformId = p.id;
       this.world.addBody(body);
@@ -34,7 +42,7 @@ export class PhysicsWorld {
     }
     for (const h of map.hazards) {
       const shape = h.kind === 'log' ? new CANNON.Cylinder(h.radius, h.radius, h.radius * 5.5, 10) : h.radius ? new CANNON.Sphere(h.radius) : new CANNON.Box(vec(h.size.map(v => v / 2)));
-      const body = new CANNON.Body({ mass: 0, type: ['bumper', 'door', 'jump-pad'].includes(h.kind) ? CANNON.Body.STATIC : CANNON.Body.KINEMATIC, position: vec(h.position), collisionFilterGroup: 1, collisionFilterMask: 2 });
+      const body = new CANNON.Body({ mass: 0, type: ['bumper', 'door', 'jump-pad'].includes(h.kind) ? CANNON.Body.STATIC : CANNON.Body.KINEMATIC, position: vec(h.position), collisionFilterGroup: 1, collisionFilterMask: 6 });
       const orientation = new CANNON.Quaternion();
       if (h.kind === 'log') orientation.setFromEuler(0, 0, Math.PI / 2);
       body.addShape(shape, new CANNON.Vec3(), orientation);
@@ -42,14 +50,47 @@ export class PhysicsWorld {
       this.world.addBody(body);
       this.hazards.set(h.id, { body, data: h });
     }
+    for (const item of map.items || []) if (!item.trigger) this.addObject(item, !authoritative);
     this.updateEnvironment(0);
+  }
+
+  addObject(data, remote = false) {
+    const body = new CANNON.Body({ mass: remote ? 0 : data.mass || 1, type: remote ? CANNON.Body.KINEMATIC : CANNON.Body.DYNAMIC,
+      shape: new CANNON.Sphere(data.radius || 0.5), position: vec(data.position), linearDamping: 0.35, angularDamping: 0.45,
+      collisionFilterGroup: 4, collisionFilterMask: remote ? 2 : 7 });
+    const object = { data, body, remote, owner: null, previousY: data.position[1] };
+    this.world.addBody(body); this.objects.set(data.id, object); return object;
+  }
+  resetObject(id, position) {
+    const object=this.objects.get(id); if(!object)return;
+    object.body.position.set(...position); object.body.previousPosition.copy(object.body.position);
+    object.body.velocity.set(0,0,0); object.body.angularVelocity.set(0,0,0); object.body.aabbNeedsUpdate=true;
+    object.owner=null; object.body.collisionFilterMask=object.remote?2:7;
+  }
+  syncObjects(states = []) {
+    for(const state of states) {
+      const object=this.objects.get(state.id); if(!object||!state.p)continue;
+      object.body.position.set(...state.p);object.body.velocity.set(...(state.v||[0,0,0]));
+      object.body.aabbNeedsUpdate=true;object.owner=state.owner;object.body.collisionFilterMask=state.owner?0:2;
+    }
+  }
+  setPlatformEnabled(id, enabled) {
+    const p=this.platforms.get(id);if(!p)return;
+    if(enabled&&p.removed){this.world.addBody(p.body);p.removed=false;p.body.aabbNeedsUpdate=true;}
+    if(!enabled&&!p.removed){this.world.removeBody(p.body);p.removed=true;p.dropAt=this.time;}
+    if(enabled)p.dropAt=null;
+  }
+  lineOfSight(from, to) {
+    const ray=new CANNON.RaycastResult();
+    this.world.raycastClosest(vec(from),vec(to),{collisionFilterMask:1,skipBackfaces:true},ray);
+    return !ray.hasHit;
   }
 
   addPlayer(id, spawn, remote = false) {
     if (this.players.has(id)) return this.players.get(id);
     // Beans never hard-lock one another in a crowd. They still collide with
     // every course collider, while remote render-only bodies stay nonphysical.
-    const body = new CANNON.Body({ mass: remote ? 0 : 1, type: remote ? CANNON.Body.KINEMATIC : CANNON.Body.DYNAMIC, fixedRotation: true, linearDamping: 0.015, position: vec(spawn), collisionFilterGroup: 2, collisionFilterMask: remote ? 0 : 1 });
+    const body = new CANNON.Body({ mass: remote ? 0 : 1, type: remote ? CANNON.Body.KINEMATIC : CANNON.Body.DYNAMIC, fixedRotation: true, linearDamping: 0.015, position: vec(spawn), collisionFilterGroup: 2, collisionFilterMask: remote ? 0 : 5 });
     // Three overlapping spheres approximate a vertical capsule cheaply.
     for (const y of [-0.35, 0, 0.35]) body.addShape(new CANNON.Sphere(RULES.radius), new CANNON.Vec3(0, y, 0));
     body.updateMassProperties();
@@ -125,6 +166,7 @@ export class PhysicsWorld {
       body.aabbNeedsUpdate = true;
     }
     for (const p of this.platforms.values()) {
+      if(p.data.drum&&!p.removed){p.body.quaternion.setFromEuler(time*p.data.drum.speed,0,0);p.body.angularVelocity.set(p.data.drum.speed,0,0);p.body.aabbNeedsUpdate=true;}
       if (p.data.turntable && !p.removed) {
         p.body.quaternion.setFromEuler(0, time * p.data.turntable, 0);
         p.body.angularVelocity.set(0, p.data.turntable, 0);
@@ -193,7 +235,7 @@ export class PhysicsWorld {
         const belt = p.grounded ? floor?.data.conveyor || [0, 0] : [0, 0];
         const turn = p.grounded ? floor?.data.turntable || 0 : 0;
         const carryX = turn ? turn * (b.position.z - floor.body.position.z) : 0;
-        const carryZ = turn ? -turn * (b.position.x - floor.body.position.x) : 0;
+        const carryZ = turn ? -turn * (b.position.x - floor.body.position.x) : p.grounded && floor?.data.drum ? floor.data.drum.speed * (b.position.y-floor.body.position.y) : 0;
         const moving = len > 0.1;
         const baseRate = p.grounded
           ? (moving ? RULES.acceleration : RULES.deceleration)
@@ -202,8 +244,9 @@ export class PhysicsWorld {
         const stunControl = time < p.stunUntil ? 0.16 : 1;
         const recoveryControl = time < p.diveRecoveryUntil ? 0.38 : 1;
         const rate = surfaceRate * DT * stunControl * recoveryControl;
-        const targetX = x * RULES.speed + belt[0] + carryX;
-        const targetZ = z * RULES.speed + belt[1] + carryZ;
+        const speedScale = (p.grounded && floor?.data.surface === 'mud' ? 0.55 : 1) * (p.speedScale || 1);
+        const targetX = x * RULES.speed * speedScale + belt[0] + carryX;
+        const targetZ = z * RULES.speed * speedScale + belt[1] + carryZ;
         const changeX = targetX - b.velocity.x, changeZ = targetZ - b.velocity.z;
         const steering = Math.min(1, rate / (Math.hypot(changeX, changeZ) || 1));
         b.velocity.x += changeX * steering;
@@ -214,6 +257,18 @@ export class PhysicsWorld {
       if (speed > RULES.maxSpeed) { b.velocity.x *= RULES.maxSpeed / speed; b.velocity.z *= RULES.maxSpeed / speed; }
       b.velocity.y = clamp(b.velocity.y, -45, 18);
     }
+    // Bounded impulses separate crowds without a rigid pileup or door jam.
+    const crowd=[...this.players.values()];
+    for(let i=0;i<crowd.length;i++)for(let j=i+1;j<crowd.length;j++){
+      const a=crowd[i],b=crowd[j];if(a.remote&&b.remote)continue;
+      let dx=a.body.position.x-b.body.position.x,dz=a.body.position.z-b.body.position.z,d=Math.hypot(dx,dz);
+      if(d>=0.84||Math.abs(a.body.position.y-b.body.position.y)>1.25)continue;
+      const overlap=0.84-d;if(d<0.001){dx=a.id<b.id?1:-1;dz=0;d=1;}
+      const impulse=Math.min(0.065,overlap*0.12);
+      if(!a.remote){a.body.velocity.x+=dx/d*impulse;a.body.velocity.z+=dz/d*impulse;}
+      if(!b.remote){b.body.velocity.x-=dx/d*impulse;b.body.velocity.z-=dz/d*impulse;}
+    }
+    for(const object of this.objects.values())if(!object.remote){object.previousY=object.body.position.y;const speed=object.body.velocity.length();if(speed>28)object.body.velocity.scale(28/speed,object.body.velocity);}
     this.world.step(DT);
     for (const id of this.pendingBreaks) {
       if (this.broken.has(id)) continue;
@@ -224,7 +279,7 @@ export class PhysicsWorld {
   }
 
   environmentSnapshot() {
-    return { broken: [...this.broken], platforms: [...this.platforms.values()].filter(p => p.data.seesaw || p.data.fallOnTouch).map(p => ({ id: p.data.id, a: Math.round(p.angle * 1000) / 1000, dropAt: p.dropAt })) };
+    return { broken: [...this.broken], platforms: [...this.platforms.values()].filter(p => p.data.seesaw || p.data.fallOnTouch || p.data.puzzle || p.data.dynamic).map(p => ({ id: p.data.id, a: Math.round(p.angle * 1000) / 1000, dropAt: p.dropAt })) };
   }
   syncEnvironment(env) {
     if (!env) return;
